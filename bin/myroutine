@@ -1,0 +1,1065 @@
+#!/bin/zsh
+#
+# myroutine — 安全にコマンドを実行し、放置された要対応を可視化する routine runner
+#
+# Usage:
+#   myroutine [options]              全ステップを順に実行
+#   myroutine [options] ls           ステップ一覧を表示
+#   myroutine [options] 1,3,5        指定したステップのみを指定順で実行
+#
+# Options:
+#   -n, --dry-run     副作用を実行せず、実行予定を表示する
+#   -y, --yes         確認プロンプトを自動承認する
+#       --json        結果を機械可読な JSON で出力する
+#       --timeout N   ステップの既定タイムアウト秒 (0 で無制限)
+#       --no-lock     多重起動ロックを取らない (テスト用)
+#   -h, --help        使い方を表示する
+#
+# ─────────────────────────────────────────────────────────────────
+# ステップ契約
+# ─────────────────────────────────────────────────────────────────
+#
+# ステップは $MYROUTINE_STEPS_DIR に「NN-name.sh」形式で 1 ファイル 1 ステップ置く。
+# 実行順はファイル名順で、ステップ番号はそこから導出される。順序を変えたいときは
+# ファイルをリネームするだけでよく、本体を含め他のどこも触らない。
+#
+#   # steps.d/50-brew-update.sh
+#   step_name="Brew Update"        # 必須。一覧とヘッダーに出る名前
+#   step_critical=true             # 任意 (既定 false)。失敗しても後続は続行するが、
+#                                  #   要対応サマリに critical として記録される
+#   step_abort_on_fail=true        # 任意 (既定 false)。失敗したら続行可否を尋ねる
+#   step_destructive=true          # 任意 (既定 false)。dry-run では実行せず、
+#                                  #   --yes が無ければ確認を強制する
+#   step_requires=(brew git)       # 任意。無いコマンドがあれば失敗ではなく skip
+#   step_requires_path=(~/foo)     # 任意。無いパスがあれば失敗ではなく skip
+#   step_timeout=300               # 任意。0 で無制限。既定は --timeout / 600 秒
+#
+#   step_run()    { ... }          # 必須。終了コード 0 が成功
+#   step_verify() { ... }          # 任意。定義されていれば step_run の終了コードより
+#                                  #   優先される「真の成否」。終了コードが嘘をつく
+#                                  #   コマンド対策として、状態を再取得して判定する
+#
+# ステップ本体から使えるもの:
+#
+#   ok / warn / err / info               出力ヘルパー
+#   add_action <id> "<やること>"          要対応サマリに載る
+#   add_info   <id> "<事後報告>"          情報セクションに載る
+#   capture [-d 既定値] VAR cmd...        コマンド失敗を検知できる形で出力を受け取る
+#   confirm "<問い>"                      確認プロンプト (tty 不在なら中止側へ倒れる)
+#   run cmd...                            副作用の実行 (dry-run では実行しない)
+#
+# add_action / add_info にステップ番号は渡さない。id はステップ内で一意な短い名前で
+# よく、本体がファイル名から導いた slug を前置して「<slug>.<id>」に正規化する。
+# id は連続掲示日数の追跡キーなので、件数などの可変値を含めないこと。
+#
+# 🔴 ステップファイルはトップレベルで副作用を持たせないこと。
+#    本体は「メタデータの読み取り」と「実行」で 2 回 source する。トップレベルに
+#    置いてよいのは step_* 変数の代入と関数定義だけで、実処理は step_run に書く。
+#
+# ─────────────────────────────────────────────────────────────────
+# 設定
+# ─────────────────────────────────────────────────────────────────
+#
+#   MYROUTINE_STEPS_DIR   ステップ置き場   既定 ${XDG_CONFIG_HOME:-~/.config}/myroutine/steps.d
+#   MYROUTINE_LOG_DIR     状態・ログ置き場 既定 ${XDG_STATE_HOME:-~/.local/state}/myroutine
+#   MYROUTINE_TIMEOUT     既定タイムアウト秒 (既定 600、0 で無制限)
+#   MYROUTINE_STREAK_WARN 何日連続で滞留したら強調するか (既定 3)
+#   NO_COLOR              設定すると ANSI カラーを無効化する
+#
+
+emulate -R zsh
+setopt pipefail
+
+: ${MYROUTINE_STEPS_DIR:=${XDG_CONFIG_HOME:-$HOME/.config}/myroutine/steps.d}
+: ${MYROUTINE_LOG_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/myroutine}
+: ${MYROUTINE_TIMEOUT:=600}
+: ${MYROUTINE_STREAK_WARN:=3}
+
+typeset -g _MR_DRY_RUN=0 _MR_YES=0 _MR_JSON=0 _MR_NO_LOCK=0
+# JSON の出力先。--json では進捗を stderr へ逃がし、素の stdout を fd 5 に退避する。
+typeset -g _MR_JSON_FD=1
+typeset -g _MR_LOCK_DIR="" _MR_TMPDIR=""
+
+# ─────────────────────────────────────────────────────────────────
+# オプション解釈
+# ─────────────────────────────────────────────────────────────────
+
+_mr_usage() {
+  print -r -- "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json] [--timeout N] [--no-lock] [ls | <ステップ番号: 1,3,5>]"
+}
+
+typeset -ga _mr_argv=()
+while (( $# > 0 )); do
+  case $1 in
+    -n|--dry-run) _MR_DRY_RUN=1; shift ;;
+    -y|--yes)     _MR_YES=1; shift ;;
+    --json)       _MR_JSON=1; shift ;;
+    --no-lock)    _MR_NO_LOCK=1; shift ;;
+    --timeout)
+      if [[ -z ${2:-} || $2 != <-> ]]; then
+        print -ru2 -- "ERROR: --timeout には秒数を指定してください"
+        exit 1
+      fi
+      MYROUTINE_TIMEOUT=$2; shift 2 ;;
+    -h|--help)    _mr_usage; exit 0 ;;
+    --)           shift; _mr_argv+=("$@"); break ;;
+    -*)
+      print -ru2 -- "ERROR: 不明なオプション: $1"
+      _mr_usage >&2
+      exit 1 ;;
+    *)            _mr_argv+=("$1"); shift ;;
+  esac
+done
+
+# JSON 出力時は人間向けの装飾を stdout に混ぜない
+if (( _MR_JSON )); then NO_COLOR=1; fi
+
+# --- 配色 ---
+if [[ -z ${NO_COLOR:-} ]]; then
+  _MR_C_RESET=$'\e[0m'; _MR_C_BOLD=$'\e[1m'; _MR_C_DIM=$'\e[2m'
+  _MR_C_RED=$'\e[31m'; _MR_C_GREEN=$'\e[32m'; _MR_C_YELLOW=$'\e[33m'; _MR_C_CYAN=$'\e[36m'
+else
+  _MR_C_RESET=""; _MR_C_BOLD=""; _MR_C_DIM=""
+  _MR_C_RED=""; _MR_C_GREEN=""; _MR_C_YELLOW=""; _MR_C_CYAN=""
+fi
+
+# ─────────────────────────────────────────────────────────────────
+# ステップに公開するプリミティブ
+# ─────────────────────────────────────────────────────────────────
+
+ok()   { print -r -- "  ${_MR_C_GREEN}✓${_MR_C_RESET} $1" }
+warn() { print -r -- "  ${_MR_C_YELLOW}${_MR_C_BOLD}▸ $1${_MR_C_RESET}" }
+err()  { print -r -- "  ${_MR_C_RED}✗ $1${_MR_C_RESET}" }
+info() { print -r -- "  $1" }
+
+# ステップはサブシェルで実行されるため親の配列を直接は変更できない。
+# fd 3 のチャネルへ 1 行ずつ書き、親側の _mr_drain が回収する。
+_mr_emit() {
+  local kind=$1 id=$2 text=$3
+  if [[ -z $id || -z $text ]]; then
+    print -ru2 -- "${kind}: id と本文の両方が必要です"
+    return 1
+  fi
+  if [[ ! $id =~ '^[A-Za-z0-9_.-]+$' ]]; then
+    print -ru2 -- "${kind}: id に使えるのは英数字と . _ - だけです: ${id}"
+    return 1
+  fi
+  # チャネルは 1 行 1 レコード。本文に改行が混ざると 2 行目以降が別レコードとして
+  # 捨てられ、サマリと JSON から欠落する。タブも列を割るのでまとめて逃がす。
+  #
+  # バックスラッシュ方式（\ → \\、改行 → \n）は復号が順序依存になり、本文に
+  # リテラルの "\n" が含まれると二重化した後半を改行に戻してしまう。
+  # % を先に退避するパーセント方式なら、%25 が %0A / %09 を部分文字列として
+  # 含みえないため、どちらの順で戻しても一意に復元できる。
+  text=${text//\%/%25}
+  text=${text//$'\n'/%0A}
+  text=${text//$'\t'/%09}
+  print -r -- "$kind"$'\t'"${_MR_STEP_NUM}"$'\t'"${_MR_STEP_SLUG}.${id}"$'\t'"$text" >&3
+}
+
+# チャネルから読み戻すときに元へ戻す
+_mr_unescape() {
+  local t=$1
+  t=${t//\%0A/$'\n'}
+  t=${t//\%09/$'\t'}
+  t=${t//\%25/%}
+  print -r -- "$t"
+}
+add_action() { _mr_emit A "$1" "$2" }
+add_info()   { _mr_emit I "$1" "$2" }
+
+# 判定に使う値を fail-open で取らせないための唯一の入口。
+#   local x=$(cmd) は代入の終了ステータスが local のものになり、cmd の失敗を
+#   検知できない。capture は非 0 のとき変数を設定せず、そのまま非 0 を返す。
+#   「失敗したら既定値でよい」ケースは -d で明示させ、|| echo "0" を書かせない。
+capture() {
+  local __def="" __has_def=0
+  if [[ ${1:-} == -d ]]; then __def=$2; __has_def=1; shift 2; fi
+  local __var=${1:-}
+  if [[ -z $__var ]]; then
+    print -ru2 -- "capture: 変数名が指定されていません"
+    return 2
+  fi
+  shift
+  if (( $# == 0 )); then
+    print -ru2 -- "capture: コマンドが指定されていません"
+    return 2
+  fi
+  # zsh の status / path のような特殊変数や readonly 変数への代入は、
+  # 呼び出し側で検知できない致命エラーになり関数ごと即座に中断する
+  # （`if ! typeset -g ...` では捕まえられない）。サブシェルで先に試して弾く。
+  if ! ( typeset -g "$__var"="" ) 2>/dev/null; then
+    err "変数に代入できません: ${__var}（予約変数・readonly の可能性）"
+    return 2
+  fi
+  local __out="" __rc=0
+  __out=$("$@") || __rc=$?
+  if (( __rc != 0 )); then
+    if (( __has_def )); then
+      typeset -g "$__var"="$__def"
+      return 0
+    fi
+    err "コマンドが失敗しました (rc=${__rc}): $*"
+    return $__rc
+  fi
+  typeset -g "$__var"="$__out"
+  return 0
+}
+
+# 確認プロンプト。tty が取れない環境 (パイプ実行・CI・スケジューラ経由) では
+# 必ず中止側に倒す。dry-run では尋ねず、実行しない側の答えを返す。
+confirm() {
+  local msg=${1:-"続行しますか?"}
+  if (( _MR_DRY_RUN )); then
+    print -r -- "  ${_MR_C_DIM}[dry-run] 確認を求める: ${msg}${_MR_C_RESET}"
+    return 1
+  fi
+  (( _MR_YES )) && return 0
+  print -rn -- "  ${_MR_C_YELLOW}${_MR_C_BOLD}${msg} [y/N]:${_MR_C_RESET} "
+  local ans=""
+  # /dev/tty が開けない環境ではリダイレクト自体がシェルのエラーになる。read の
+  # stderr だけを潰しても漏れるため、ブロックごと黙らせたうえで中止側へ倒す。
+  { read -k 1 ans </dev/tty } 2>/dev/null || ans="n"
+  print -r -- ""
+  [[ $ans == [yY] ]]
+}
+
+# 副作用は必ずこれを通す。dry-run を「ステップの礼儀」ではなく構造で担保する。
+run() {
+  if (( $# == 0 )); then
+    print -ru2 -- "run: コマンドが指定されていません"
+    return 2
+  fi
+  if (( _MR_DRY_RUN )); then
+    print -r -- "  ${_MR_C_DIM}[dry-run] $*${_MR_C_RESET}"
+    return 0
+  fi
+  "$@"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 収集した状態
+# ─────────────────────────────────────────────────────────────────
+
+typeset -ga _mr_actions=() _mr_infos=()          # "num\tid\ttext"
+typeset -ga _mr_step_files=() _mr_step_names=() _mr_step_slugs=()
+typeset -ga _mr_step_critical=() _mr_step_abort=() _mr_step_destructive=()
+typeset -ga _mr_result_status=() _mr_result_rc=() _mr_result_ms=() _mr_result_note=()
+# 実際に実行して要対応の有無を評価できたステップの slug。
+# skip したステップの要対応は「今回出なかった」のではなく「見ていない」ので、
+# 解消判定と連続日数から除外する必要がある。
+typeset -ga _mr_evaluated=()
+typeset -g _mr_last_step_rc=0
+typeset -g _MR_FULL_RUN=0
+
+# ─────────────────────────────────────────────────────────────────
+# ステップの探索とメタデータ読み取り
+# ─────────────────────────────────────────────────────────────────
+
+_mr_slug_of() {
+  local base=${1:t}
+  base=${base%.sh}
+  print -r -- "${base#*-}"
+}
+
+# ステップを 1 つサブシェルで source し、メタデータだけを取り出す。
+# 契約違反 (トップレベルの出力) が結果を汚さないよう stdout は捨て、
+# メタデータは fd 4 で取り出す。
+_mr_read_meta() {
+  local file=$1 out="" rc=0
+  out=$(
+    exec 4>&1 1>/dev/null
+    step_name=""
+    step_critical=false
+    step_abort_on_fail=false
+    step_destructive=false
+    source "$file" || exit 10
+    [[ -n $step_name ]] || exit 11
+    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}"$'\t'"${step_destructive}" >&4
+  ) || rc=$?
+  case $rc in
+    0)  print -r -- "$out"; return 0 ;;
+    10) print -ru2 -- "ERROR: ステップの読み込みに失敗しました: $file" ;;
+    11) print -ru2 -- "ERROR: step_name が定義されていません: $file" ;;
+    *)  print -ru2 -- "ERROR: メタデータの取得に失敗しました (rc=$rc): $file" ;;
+  esac
+  return 1
+}
+
+_mr_discover() {
+  if [[ ! -d $MYROUTINE_STEPS_DIR ]]; then
+    print -ru2 -- "ERROR: ステップディレクトリがありません: $MYROUTINE_STEPS_DIR"
+    return 1
+  fi
+  _mr_step_files=($MYROUTINE_STEPS_DIR/[0-9]*.sh(N))
+  if (( ${#_mr_step_files} == 0 )); then
+    print -ru2 -- "ERROR: ステップがありません: $MYROUTINE_STEPS_DIR"
+    print -ru2 -- "       NN-name.sh 形式のファイルを置いてください（例: 10-network.sh）"
+    return 1
+  fi
+  local f="" meta="" slug=""
+  local -a seen_slugs=()
+  for f in $_mr_step_files; do
+    meta=$(_mr_read_meta "$f") || return 1
+    local -a parts=("${(@s:	:)meta}")
+    _mr_step_names+=("${parts[1]}")
+    _mr_step_critical+=("${parts[2]}")
+    _mr_step_abort+=("${parts[3]}")
+    _mr_step_destructive+=("${parts[4]}")
+    slug=$(_mr_slug_of "$f")
+    # slug は action id の前置に使われ、履歴ではカンマ区切りで並ぶ。
+    # 区切り文字が混ざると連続日数・NEW・解消の追跡が壊れる。
+    # slug は action id に "<slug>.<id>" の形で前置される。slug 自身がドットを
+    # 含むと id からの復元（最初のドットまで）が壊れ、連続日数・NEW・解消の
+    # 判定対象から漏れる。履歴の区切り文字も入れられない。
+    if [[ -z $slug || ! $slug =~ '^[A-Za-z0-9_-]+$' ]]; then
+      print -ru2 -- "ERROR: ステップ slug に使えるのは英数字と _ - だけです: ${slug} (${f:t})"
+      return 1
+    fi
+    if (( ${seen_slugs[(Ie)$slug]} )); then
+      print -ru2 -- "ERROR: ステップ slug が重複しています: ${slug} (${f:t})"
+      print -ru2 -- "       slug は要対応 id の前置に使うため一意である必要があります"
+      return 1
+    fi
+    seen_slugs+=("$slug")
+    _mr_step_slugs+=("$slug")
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 多重起動ロック
+# ─────────────────────────────────────────────────────────────────
+
+# flock は macOS に無いため、mkdir のアトミック性で排他する。
+# ロックが取れないときは中止側へ倒す (fail-closed)。
+_mr_acquire_lock() {
+  (( _MR_NO_LOCK )) && return 0
+  local lock="$MYROUTINE_LOG_DIR/lock.d" other="" attempt=0
+  for attempt in 1 2; do
+    if mkdir "$lock" 2>/dev/null; then
+      print -r -- $$ > "$lock/pid"
+      _MR_LOCK_DIR=$lock
+      return 0
+    fi
+    other=$(<"$lock/pid") 2>/dev/null || other=""
+    if [[ -n $other ]] && kill -0 "$other" 2>/dev/null; then
+      print -ru2 -- "ERROR: myroutine は既に実行中です (pid=${other})"
+      return 1
+    fi
+    # 単に rm -rf すると、2 プロセスが同時に残留を検知したとき、片方が
+    # 取り直した新しいロックをもう片方が消してしまい多重実行になる。
+    # rename は原子的なので、退避に成功した 1 プロセスだけが回収する。
+    print -ru2 -- "警告: 残留ロックを回収します (pid=${other:-unknown})"
+    local tomb="${lock}.stale.$$"
+    if mv "$lock" "$tomb" 2>/dev/null; then
+      rm -rf "$tomb"
+    fi
+  done
+  print -ru2 -- "ERROR: ロックを取得できません: $lock"
+  return 1
+}
+
+_mr_cleanup() {
+  [[ -n $_MR_LOCK_DIR ]] && rm -rf "$_MR_LOCK_DIR"
+  [[ -n $_MR_TMPDIR ]] && rm -rf "$_MR_TMPDIR"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 実行
+# ─────────────────────────────────────────────────────────────────
+
+# 前提条件を確認する。満たさなければ理由を返して skip させる。
+# 「前提が無い」と「実行して失敗した」を同じ非 0 で混ぜないための分岐。
+_mr_check_requires() {
+  local file=$1
+  (
+    exec 4>&1 1>/dev/null
+    step_requires=()
+    step_requires_path=()
+    source "$file" || exit 10
+    local missing=()
+    local c=""
+    for c in $step_requires; do
+      command -v "$c" >/dev/null 2>&1 || missing+=("コマンド: $c")
+    done
+    for c in $step_requires_path; do
+      [[ -e $c ]] || missing+=("パス: $c")
+    done
+    (( ${#missing} == 0 )) && exit 0
+    print -r -- "${(j:, :)missing}" >&4
+    exit 1
+  )
+}
+
+_mr_step_timeout_of() {
+  local file=$1
+  (
+    exec 4>&1 1>/dev/null
+    step_timeout=""
+    source "$file" || exit 10
+    print -r -- "${step_timeout:-$MYROUTINE_TIMEOUT}" >&4
+  ) 2>/dev/null || print -r -- "$MYROUTINE_TIMEOUT"
+}
+
+# ステップをサブシェルで実行する。変数・関数の定義は次のステップへ漏れない。
+# 終了コード: 10 = source 失敗 / 11 = step_run 未定義 / それ以外は
+#   step_verify があればその rc、無ければ step_run の rc
+_mr_exec_step() {
+  local file=$1 num=$2 slug=$3 chan=$4
+  (
+    typeset -g _MR_STEP_NUM=$num _MR_STEP_SLUG=$slug
+    exec 3>>"$chan"
+    # 10 / 11 をそのまま終了コードにすると、step_run が同じ値を返したときに
+    # 「読み込み失敗」「関数未定義」と誤表示される。内部事情はマーカーで伝える。
+    source "$file" || { print -n x > "${chan}.srcfail"; exit 10 }
+    (( ${+functions[step_run]} )) || { print -n x > "${chan}.nofunc"; exit 11 }
+    local run_rc=0 v_rc=0
+    step_run || run_rc=$?
+    if (( ${+functions[step_verify]} )); then
+      step_verify || v_rc=$?
+      print -r -- "V"$'\t'"$num"$'\t'"$run_rc"$'\t'"$v_rc" >&3
+      exit $v_rc
+    fi
+    exit $run_rc
+  )
+}
+
+# タイムアウト付きで待つ。timeout が 0 なら無制限。
+# タイムアウト時は子孫ごと終了させ、孤児プロセスを残さない。
+_mr_descendants() {
+  local p=$1 c=""
+  for c in ${(f)"$(pgrep -P $p 2>/dev/null)"}; do
+    [[ -n $c ]] || continue
+    print -r -- "$c"
+    _mr_descendants "$c"
+  done
+}
+
+# 子孫を辿りながら順に kill すると取りこぼす。
+#   - 子を先に落とすと、親スクリプトは「子が終わった」と見なして次の行へ進む
+#   - 親を先に落とすと、孫が init へ里子に出され pgrep -P で辿れなくなる
+# どちらも起きないよう、木を全部数え上げてから一括で落とす。
+# 取りこぼした子孫はログ用パイプを掴んだまま残り、実行全体が終われなくなる。
+# 与えられた pid 群を TERM → 猶予 → KILL の順で確実に落とす
+_mr_kill_set() {
+  local x="" i=0 alive=0
+  local -a all=("$@")
+  (( ${#all} == 0 )) && return 0
+  for x in $all; do
+    [[ -n $x ]] && kill -TERM "$x" 2>/dev/null
+  done
+  # TERM を捕捉・無視するプロセスが残るとログ用パイプを掴んだままになり、
+  # 打ち切ったはずの実行が終われない。猶予を与えたうえで KILL に切り替える。
+  for i in {1..10}; do
+    alive=0
+    for x in $all; do
+      [[ -n $x ]] && kill -0 "$x" 2>/dev/null && alive=1
+    done
+    (( alive )) || return 0
+    sleep 0.2
+  done
+  for x in $all; do
+    [[ -n $x ]] && kill -KILL "$x" 2>/dev/null
+  done
+}
+
+_mr_kill_tree() { _mr_kill_set "$1" ${(f)"$(_mr_descendants "$1")"} }
+
+# 自分自身は残したまま、配下のプロセスだけを落とす。
+# ログ用パイプの左側は別プロセスなので、シグナル受信時はこちらで畳む必要がある
+# （実行中ステップの pid はそのサブシェル内の変数で、親からは見えない）。
+_mr_kill_descendants() { _mr_kill_set ${(f)"$(_mr_descendants "$1")"} }
+
+# 打ち切りが起きたかどうかは終了コードではなくこのフラグで伝える。
+# ステップ自身が 124 を返すこともあるため、値で区別してはいけない。
+typeset -g _mr_timed_out=0
+typeset -g _MR_CURRENT_PID=""
+
+_mr_run_with_timeout() {
+  local file=$1 num=$2 slug=$3 chan=$4 limit=$5
+  local mark="$_MR_TMPDIR/timeout.$num"
+  rm -f "$mark" "${chan}.srcfail" "${chan}.nofunc"
+  _mr_timed_out=0
+
+  if (( limit <= 0 )); then
+    local rc=0
+    _mr_exec_step "$file" "$num" "$slug" "$chan" || rc=$?
+    return $rc
+  fi
+
+  _mr_exec_step "$file" "$num" "$slug" "$chan" &
+  local pid=$!
+  _MR_CURRENT_PID=$pid
+  # 監視プロセスの出力は握り潰す。ログ用パイプを掴んだまま残ると、
+  # 監視が生き残っている間パイプラインが終了できなくなる。
+  { sleep "$limit"; print -n x > "$mark"; _mr_kill_tree "$pid" } >/dev/null 2>&1 &
+  local watchdog=$!
+
+  local rc=0
+  wait "$pid" || rc=$?
+  # kill だけでは監視サブシェルの子 (sleep) が孤児として残る。子孫ごと落とす。
+  _mr_kill_tree "$watchdog"
+  wait "$watchdog" 2>/dev/null
+  _MR_CURRENT_PID=""
+
+  [[ -e $mark ]] && _mr_timed_out=1
+  return $rc
+}
+
+_mr_drain() {
+  local chan=$1 line="" kind="" num="" a="" b=""
+  [[ -s $chan ]] || return 0
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    local -a f=("${(@s:	:)line}")
+    kind=${f[1]}; num=${f[2]:-}; a=${f[3]:-}; b=${f[4]:-}
+    case $kind in
+      A) _mr_actions+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
+      I) _mr_infos+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
+      V)
+        if (( a == 0 && b != 0 )); then
+          err "step_run は成功したが step_verify が失敗した (検証を優先して失敗扱い)"
+        elif (( a != 0 && b == 0 )); then
+          warn "step_run は rc=${a} だが step_verify は通過した (検証を優先して成功扱い)"
+        fi ;;
+    esac
+  done < "$chan"
+}
+
+_mr_hdr() {
+  print -r -- ""
+  print -r -- "${_MR_C_CYAN}${_MR_C_BOLD}━━━━━ [$1/$2] $3 ━━━━━━━━━━━━━━━━━━━━━${_MR_C_RESET}"
+}
+
+zmodload zsh/datetime 2>/dev/null
+_mr_now_ms() {
+  if [[ -n ${EPOCHREALTIME:-} ]]; then
+    printf '%.0f\n' $(( EPOCHREALTIME * 1000 ))
+  else
+    print -r -- $(( $(date +%s) * 1000 ))
+  fi
+}
+
+_mr_record() {
+  # $1: 添字, $2: status, $3: rc, $4: 所要ミリ秒, $5: 備考
+  _mr_result_status[$1]=$2
+  _mr_result_rc[$1]=$3
+  _mr_result_ms[$1]=$4
+  _mr_result_note[$1]=$5
+  # 失敗・タイムアウトしたステップは要対応の有無を確認しきれていない。
+  # skip と同じく「見ていない」側に置かないと、判定前に落ちただけで
+  # 前回の要対応が「解消」と誤表示され、連続日数も途切れる。
+  [[ $2 == ok ]] && _mr_evaluated+=("${_mr_step_slugs[$1]}")
+}
+
+_mr_run_step() {
+  local n=$1
+  local total=${#_mr_step_files}
+  if (( n < 1 || n > total )); then
+    print -ru2 -- "ERROR: ステップ $n は存在しません（1〜${total}）"
+    _mr_last_step_rc=1
+    return 1
+  fi
+
+  local name=${_mr_step_names[$n]} file=${_mr_step_files[$n]} slug=${_mr_step_slugs[$n]}
+  _mr_hdr "$n" "$total" "$name"
+
+  # 前提条件 → skip
+  local missing=""
+  if ! missing=$(_mr_check_requires "$file"); then
+    if [[ -n $missing ]]; then
+      print -r -- "  ${_MR_C_DIM}⊘ skip: 前提が足りません（${missing}）${_MR_C_RESET}"
+      _mr_record "$n" skip 0 0 "$missing"
+      _mr_last_step_rc=0
+      return 0
+    fi
+    err "前提条件の確認に失敗しました"
+    _mr_record "$n" fail 1 0 "requires check failed"
+    _mr_last_step_rc=1
+    return 1
+  fi
+
+  # 破壊的ステップのゲート
+  if [[ ${_mr_step_destructive[$n]} == true ]]; then
+    if (( _MR_DRY_RUN )); then
+      print -r -- "  ${_MR_C_DIM}[dry-run] 破壊的ステップのため実行しません${_MR_C_RESET}"
+      _mr_record "$n" skip 0 0 "dry-run (destructive)"
+      _mr_last_step_rc=0
+      return 0
+    fi
+    # ステップ側が confirm を呼び忘れても本体が埋める
+    if ! confirm "「${name}」は破壊的な操作を含みます。実行しますか?"; then
+      print -r -- "  ${_MR_C_DIM}⊘ skip: 実行を見送りました${_MR_C_RESET}"
+      _mr_record "$n" skip 0 0 "declined (destructive)"
+      _mr_last_step_rc=0
+      return 0
+    fi
+  fi
+
+  local chan="$_MR_TMPDIR/chan"
+  : > "$chan"
+  local limit=$(_mr_step_timeout_of "$file")
+  local t0=$(_mr_now_ms)
+  local rc=0
+  _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" || rc=$?
+  local ms=$(( $(_mr_now_ms) - t0 ))
+  _mr_drain "$chan"
+  _mr_last_step_rc=$rc
+
+  if (( rc == 0 )); then
+    _mr_record "$n" ok 0 "$ms" ""
+    return 0
+  fi
+
+  # 終了コードの値で内部事情を判別しない（ステップが同じ値を返しうる）
+  if (( _mr_timed_out )); then
+    err "${name} がタイムアウトしました (${limit}s)"
+    _mr_record "$n" timeout "$rc" "$ms" "${limit}s"
+  elif [[ -e "${chan}.srcfail" ]]; then
+    err "ステップの読み込みに失敗しました"
+    _mr_record "$n" fail "$rc" "$ms" "source failed"
+  elif [[ -e "${chan}.nofunc" ]]; then
+    err "step_run が定義されていません"
+    _mr_record "$n" fail "$rc" "$ms" "step_run undefined"
+  else
+    err "${name} に失敗しました (rc=${rc})"
+    _mr_record "$n" fail "$rc" "$ms" ""
+  fi
+
+  # critical は「中断する」フラグではなく「続行するが要対応として記録する」フラグ
+  if [[ ${_mr_step_critical[$n]} == true ]]; then
+    _mr_actions+=("${n}"$'\t'"${slug}.__critical"$'\t'"${name} が失敗（critical）— 要確認")
+    return 1
+  fi
+  return 0
+}
+
+# 失敗したステップが step_abort_on_fail を宣言していれば続行可否を尋ねる。
+# 戻り値 0 = 続行 / 1 = 中断
+_mr_maybe_abort() {
+  local n=$1
+  [[ ${_mr_step_abort[$n]} == true ]] || return 0
+  (( _mr_last_step_rc != 0 )) || return 0
+
+  if confirm "「${_mr_step_names[$n]}」が失敗しました。続行しますか?"; then
+    info "続行します..."
+    return 0
+  fi
+  print -r -- "  中断します。"
+  # 中断は「クリーンに終わった」ではない。サマリだけを見る人に伝わるよう残す。
+  _mr_actions+=("${n}"$'\t'"${_mr_step_slugs[$n]}.__aborted"$'\t'"${_mr_step_names[$n]} の失敗により中断した — 原因を解消して再実行する")
+  return 1
+}
+
+_mr_run_sequence() {
+  local -a seq=("$@")
+  local overall=0 n=""
+  for n in $seq; do
+    _mr_run_step "$n" || overall=1
+    if ! _mr_maybe_abort "$n"; then
+      # 後続ステップを実行していないため要対応の集合が欠けている。
+      # このまま記録すると次回に既存の要対応が誤って「解消」扱いになる。
+      _MR_FULL_RUN=0
+      _mr_finish 1
+      return 1
+    fi
+  done
+  _mr_finish $overall
+  return $overall
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 履歴と劣化検知
+# ─────────────────────────────────────────────────────────────────
+#
+# 履歴は「実行日 <TAB> 時刻 <TAB> action id のカンマ区切り <TAB> 評価できた slug の
+# カンマ区切り」の TSV で追記する。
+#
+# 4 列目が要る理由: skip されたステップの要対応は「今回出なかった」のではなく
+# 「見ていない」。区別しないと、前提コマンドが一時的に無いだけで前回の要対応が
+# 誤って「解消」になり、連続日数も失われる。4 列目が空 or "*" の行は旧形式として
+# 「全ステップを評価した」とみなす。
+#
+# 部分実行 (myroutine 2,3) と中断した実行は、そもそも記録しない。
+
+_mr_history_file() { print -r -- "$MYROUTINE_LOG_DIR/history.tsv" }
+
+typeset -ga _mr_new_ids=() _mr_resolved_ids=()
+typeset -gA _mr_streak=()
+
+_mr_current_ids() {
+  local a=""
+  for a in "${_mr_actions[@]}"; do
+    print -r -- "${${(@s:	:)a}[2]}"
+  done
+}
+
+# 履歴を実行日単位に畳んで新しい順に返す ("date<TAB>id,id,...")
+_mr_history_days() {
+  local hf=$(_mr_history_file)
+  [[ -f $hf ]] || return 0
+  local -A byday=() byeval=()
+  local -a order=()
+  local line="" d="" ids="" evals=""
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    local -a f=("${(@s:	:)line}")
+    d=${f[1]}; ids=${f[3]:-}; evals=${f[4]:-}
+    # 値の空判定だと「その日の 1 回目が要対応ゼロ」のときに同じ日を
+    # 二重に数え、連続日数が水増しされる。キーの有無で初出を判定する。
+    if (( ! ${+byday[$d]} )); then order+=("$d"); fi
+    byday[$d]=$ids
+    byeval[$d]=${evals:-\*}
+  done < "$hf"
+  local i=0
+  for (( i = ${#order}; i >= 1; i-- )); do
+    print -r -- "${order[$i]}"$'\t'"${byday[${order[$i]}]}"$'\t'"${byeval[${order[$i]}]}"
+  done
+}
+
+# その日にそのステップを評価できたか（旧形式・空欄は「評価した」とみなす）
+_mr_day_evaluated() {
+  local field=$1 slug=$2
+  [[ -z $field || $field == '*' ]] && return 0
+  local -a l=(${(s:,:)field})
+  (( ${l[(Ie)$slug]} ))
+}
+
+_mr_analyze_history() {
+  # 部分実行・中断は要対応の集合が欠けるため、比較の土台にできない
+  (( _MR_FULL_RUN )) || return 0
+  local today=$(date +%Y-%m-%d)
+  local -a cur=(${(f)"$(_mr_current_ids)"})
+  local -a days=(${(f)"$(_mr_history_days)"})
+
+  # 連続「日数」は当日を数えないので、streak の走査からは当日を外す。
+  local -a past=()
+  local d=""
+  for d in $days; do
+    [[ ${d%%$'\t'*} == $today ]] && continue
+    past+=("$d")
+  done
+  # NEW / 解消 は「前回の実行」との比較なので、当日の先行実行があればそれを使う。
+  # 当日を一律に除外すると、朝に出た要対応が午後も NEW と表示され、
+  # 午後に消えても解消が出ない。
+  local prev_entry=""
+  (( ${#days} > 0 )) && prev_entry=${days[1]}
+
+  local id=""
+  for id in $cur; do
+    local streak=1 entry=""
+    local slug=${id%%.*}
+    for entry in $past; do
+      local -a col=("${(@s:	:)entry}")
+      # そのステップを評価していない日は、連続を切りも伸ばしもしない
+      _mr_day_evaluated "${col[3]}" "$slug" || continue
+      local -a ids=(${(s:,:)col[2]})
+      if (( ${ids[(Ie)$id]} )); then
+        (( streak++ ))
+      else
+        break
+      fi
+    done
+    _mr_streak[$id]=$streak
+  done
+
+  # 直前の実行と比べて新規 / 解消を出す。
+  # 今回評価していないステップの要対応は「見ていない」だけなので触らない。
+  if [[ -n $prev_entry ]]; then
+    local -a pcol=("${(@s:	:)prev_entry}")
+    local -a prev=(${(s:,:)pcol[2]})
+    for id in $cur; do
+      _mr_day_evaluated "${pcol[3]}" "${id%%.*}" || continue
+      (( ${prev[(Ie)$id]} )) || _mr_new_ids+=("$id")
+    done
+    for id in $prev; do
+      [[ -z $id ]] && continue
+      (( ${_mr_evaluated[(Ie)${id%%.*}]} )) || continue
+      (( ${cur[(Ie)$id]} )) || _mr_resolved_ids+=("$id")
+    done
+  fi
+}
+
+_mr_append_history() {
+  local hf=$(_mr_history_file)
+  local -a cur=(${(f)"$(_mr_current_ids)"})
+  local -aU ev=(${_mr_evaluated})
+  print -r -- "$(date +%Y-%m-%d)"$'\t'"$(date +%H:%M:%S)"$'\t'"${(j:,:)cur}"$'\t'"${(j:,:)ev}" >> "$hf"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# サマリ
+# ─────────────────────────────────────────────────────────────────
+
+_mr_fmt_ms() {
+  local ms=$1
+  (( ms < 1000 )) && { print -r -- "${ms}ms"; return }
+  local s=$(( ms / 1000 ))
+  (( s < 60 )) && { print -r -- "${s}s"; return }
+  print -r -- "$(( s / 60 ))m$(( s % 60 ))s"
+}
+
+# 要対応と情報を別枠にする理由:
+#   要対応ボックスは「人間がこれから何をすべきか」の置き場。自動実行済みの
+#   事後報告を混ぜると対応必須項目が埋もれる。かといってステップ本文だけでは
+#   流し読みで見落とすため、第 3 の枠として情報セクションを設ける。
+_mr_summary_human() {
+  print -r -- ""
+  print -r -- "${_MR_C_BOLD}════════════════════════════════════════════${_MR_C_RESET}"
+  if (( ${#_mr_actions} == 0 )); then
+    print -r -- "${_MR_C_GREEN}${_MR_C_BOLD}  ✓ 要対応なし — すべてクリーン${_MR_C_RESET}"
+  else
+    print -r -- "${_MR_C_YELLOW}${_MR_C_BOLD}  ⚠ 要対応 ${#_mr_actions} 件${_MR_C_RESET}"
+    print -r -- ""
+    local a="" num="" id="" text="" tag=""
+    for a in "${_mr_actions[@]}"; do
+      local -a p=("${(@s:	:)a}")
+      num=${p[1]}; id=${p[2]}; text=${p[3]}
+      tag=""
+      if (( ${_mr_new_ids[(Ie)$id]} )); then
+        tag=" ${_MR_C_CYAN}NEW${_MR_C_RESET}"
+      elif [[ -n ${_mr_streak[$id]:-} ]] && (( ${_mr_streak[$id]} >= MYROUTINE_STREAK_WARN )); then
+        tag=" ${_MR_C_RED}${_MR_C_BOLD}(${_mr_streak[$id]} 日連続)${_MR_C_RESET}"
+      elif [[ -n ${_mr_streak[$id]:-} ]] && (( ${_mr_streak[$id]} > 1 )); then
+        tag=" ${_MR_C_DIM}(${_mr_streak[$id]} 日連続)${_MR_C_RESET}"
+      fi
+      print -r -- "  ${_MR_C_YELLOW}${_MR_C_BOLD}▸ [${num}] ${text}${_MR_C_RESET}${tag}"
+    done
+  fi
+
+  if (( ${#_mr_infos} > 0 || ${#_mr_resolved_ids} > 0 )); then
+    print -r -- ""
+    local n=$(( ${#_mr_infos} + ${#_mr_resolved_ids} ))
+    print -r -- "${_MR_C_CYAN}${_MR_C_BOLD}  ℹ 情報 ${n} 件（対応不要）${_MR_C_RESET}"
+    print -r -- ""
+    local i=""
+    for i in "${_mr_infos[@]}"; do
+      local -a p=("${(@s:	:)i}")
+      print -r -- "  ${_MR_C_CYAN}· [${p[1]}] ${p[3]}${_MR_C_RESET}"
+    done
+    for i in $_mr_resolved_ids; do
+      print -r -- "  ${_MR_C_GREEN}· 解消: ${i}${_MR_C_RESET}"
+    done
+  fi
+  print -r -- "${_MR_C_BOLD}════════════════════════════════════════════${_MR_C_RESET}"
+
+  # 所要時間
+  local total_ms=0 n=0 shown=0
+  for (( n = 1; n <= ${#_mr_step_files}; n++ )); do
+    [[ -n ${_mr_result_ms[$n]:-} ]] || continue
+    (( total_ms += _mr_result_ms[$n] ))
+    shown=1
+  done
+  (( shown )) && print -r -- "${_MR_C_DIM}  所要 $(_mr_fmt_ms $total_ms)${_MR_C_RESET}"
+}
+
+_mr_json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  # 残る U+0001-U+001F（色付き出力に混じる ESC 等）も潰さないと不正な JSON になる
+  local c="" i=0
+  for i in {1..31}; do
+    case $i in 8|9|10|12|13) continue ;; esac
+    c=$(printf "\\$(printf '%03o' $i)")
+    [[ $s == *$c* ]] && s=${s//$c/$(printf '\\u%04x' $i)}
+  done
+  print -r -- "$s"
+}
+
+_mr_summary_json() {
+  local out="{" n=0 first=1
+  out+="\"steps\":["
+  for (( n = 1; n <= ${#_mr_step_files}; n++ )); do
+    [[ -n ${_mr_result_status[$n]:-} ]] || continue
+    (( first )) || out+=","
+    first=0
+    out+="{\"n\":${n}"
+    out+=",\"name\":\"$(_mr_json_escape "${_mr_step_names[$n]}")\""
+    out+=",\"slug\":\"$(_mr_json_escape "${_mr_step_slugs[$n]}")\""
+    out+=",\"status\":\"${_mr_result_status[$n]}\""
+    out+=",\"rc\":${_mr_result_rc[$n]:-0}"
+    out+=",\"duration_ms\":${_mr_result_ms[$n]:-0}"
+    out+=",\"note\":\"$(_mr_json_escape "${_mr_result_note[$n]:-}")\"}"
+  done
+  out+="],\"actions\":["
+  first=1
+  local a=""
+  for a in "${_mr_actions[@]}"; do
+    local -a p=("${(@s:	:)a}")
+    (( first )) || out+=","
+    first=0
+    local isnew=false
+    (( ${_mr_new_ids[(Ie)${p[2]}]} )) && isnew=true
+    out+="{\"step\":${p[1]},\"id\":\"$(_mr_json_escape "${p[2]}")\""
+    out+=",\"text\":\"$(_mr_json_escape "${p[3]}")\""
+    out+=",\"streak_days\":${_mr_streak[${p[2]}]:-1},\"new\":${isnew}}"
+  done
+  out+="],\"infos\":["
+  first=1
+  local i=""
+  for i in "${_mr_infos[@]}"; do
+    local -a p=("${(@s:	:)i}")
+    (( first )) || out+=","
+    first=0
+    out+="{\"step\":${p[1]},\"id\":\"$(_mr_json_escape "${p[2]}")\",\"text\":\"$(_mr_json_escape "${p[3]}")\"}"
+  done
+  out+="],\"resolved\":["
+  first=1
+  for i in $_mr_resolved_ids; do
+    (( first )) || out+=","
+    first=0
+    out+="\"$(_mr_json_escape "$i")\""
+  done
+  out+="]}"
+  print -r -- "$out" >&$_MR_JSON_FD
+}
+
+_mr_finish() {
+  _mr_analyze_history
+  if (( _MR_JSON )); then
+    _mr_summary_json
+  else
+    _mr_summary_human
+  fi
+  # dry-run は実際の状態ではないので履歴を汚さない。
+  # 部分実行も要対応の集合が欠けるため記録しない。
+  if (( _MR_FULL_RUN && ! _MR_DRY_RUN )); then
+    _mr_append_history
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 一覧
+# ─────────────────────────────────────────────────────────────────
+
+_mr_show_list() {
+  print -r -- "${_MR_C_BOLD}myroutine ステップ一覧:${_MR_C_RESET}"
+  print -r -- "${_MR_C_DIM}  ${MYROUTINE_STEPS_DIR}${_MR_C_RESET}"
+  local total=${#_mr_step_files} n=0 mark=""
+  for (( n = 1; n <= total; n++ )); do
+    mark=""
+    [[ ${_mr_step_critical[$n]} == true ]] && mark+=" ${_MR_C_YELLOW}(critical)${_MR_C_RESET}"
+    [[ ${_mr_step_destructive[$n]} == true ]] && mark+=" ${_MR_C_RED}(破壊的)${_MR_C_RESET}"
+    [[ ${_mr_step_abort[$n]} == true ]] && mark+=" ${_MR_C_DIM}(失敗時に続行確認)${_MR_C_RESET}"
+    print -r -- "  ${_MR_C_CYAN}${n}.${_MR_C_RESET} ${_mr_step_names[$n]}${mark}"
+    print -r -- "     ${_MR_C_DIM}${_mr_step_files[$n]:t}  slug=${_mr_step_slugs[$n]}${_MR_C_RESET}"
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 引数解釈（ステップ番号）
+# ─────────────────────────────────────────────────────────────────
+
+# 「1,3,5」「1 3 5」「1, 3」いずれも受ける。数値以外が混じればエラーにし、
+# 黙って読み飛ばすことはしない。
+_mr_parse_steps() {
+  local -a raw=() out=()
+  local a="" n=""
+  for a in "$@"; do
+    raw+=(${(s:,:)${a//[[:space:]]/,}})
+  done
+  for n in $raw; do
+    [[ -z $n ]] && continue
+    if [[ $n != <-> ]]; then
+      print -ru2 -- "ERROR: ステップ番号ではありません: $n"
+      return 1
+    fi
+    out+=($n)
+  done
+  if (( ${#out} == 0 )); then
+    print -ru2 -- "ERROR: ステップ番号が指定されていません"
+    return 1
+  fi
+  print -r -- ${(j: :)out}
+}
+
+# ─────────────────────────────────────────────────────────────────
+# ログ
+# ─────────────────────────────────────────────────────────────────
+
+# 端末には色付きのまま出し、ログファイル側だけ ANSI エスケープを除去して追記する。
+# 追記なので、同日 2 回目の実行や部分実行で前回のログが消えない。
+# pipefail により、tee で終わるパイプラインでも実行結果の終了コードが伝わる。
+# パイプラインを前景で走らせると、zsh は実行が終わるまで trap を保留する。
+# その間に届いた TERM / INT は子へ伝わらず、中断したはずの後続ステップが
+# そのまま実行されてしまう。background + wait なら wait が割り込まれて
+# trap が即座に走る。終了コードはパイプラインを跨げないのでファイルで返す。
+_mr_with_log() {
+  local label=$1; shift
+  local -a seq=("$@")
+  local log_file="$MYROUTINE_LOG_DIR/$(date +%Y-%m-%d).txt"
+  local rcfile="$_MR_TMPDIR/seq.rc"
+  print -r -- 1 > "$rcfile"
+  {
+    print -r -- "=== myroutine ${label} $(date '+%Y-%m-%d %H:%M:%S') ==="
+    local r=0
+    _mr_run_sequence "${seq[@]}" || r=$?
+    print -r -- $r > "$rcfile"
+  } 2>&1 | tee >(sed $'s/\e\\[[0-9;]*m//g' >> "$log_file") &
+  wait
+  return $(<"$rcfile")
+}
+
+# ─────────────────────────────────────────────────────────────────
+# main
+# ─────────────────────────────────────────────────────────────────
+
+if ! mkdir -p "$MYROUTINE_LOG_DIR"; then
+  print -ru2 -- "ERROR: 状態ディレクトリを作成できません: $MYROUTINE_LOG_DIR"
+  exit 1
+fi
+
+_MR_TMPDIR=$(mktemp -d -t myroutine-XXXXXX) || {
+  print -ru2 -- "ERROR: 一時ディレクトリを作成できません"
+  exit 1
+}
+# シグナル trap が後片付けだけして戻ると、ロックと一時ディレクトリを消したまま
+# 後続ステップが走り続ける（別プロセスの同時起動も許してしまう）。
+# 実行中のステップを落としたうえで、128 + シグナル番号で終了する。
+_mr_on_signal() {
+  _mr_kill_descendants $$
+  _mr_cleanup
+  exit $1
+}
+trap '_mr_cleanup' EXIT
+trap '_mr_on_signal 130' INT
+trap '_mr_on_signal 143' TERM
+trap '_mr_on_signal 129' HUP
+trap '_mr_on_signal 141' PIPE
+
+case ${_mr_argv[1]:-} in
+  ls)
+    _mr_discover || exit 1
+    _mr_show_list
+    ;;
+  "")
+    _mr_discover || exit 1
+    _mr_acquire_lock || exit 1
+    _MR_FULL_RUN=1
+    if (( _MR_JSON )); then
+      exec 5>&1 1>&2
+      _MR_JSON_FD=5
+      _mr_run_sequence {1..${#_mr_step_files}}
+    else
+      _mr_with_log "all" {1..${#_mr_step_files}}
+    fi
+    ;;
+  *)
+    _mr_discover || exit 1
+    _mr_spec=$(_mr_parse_steps "${_mr_argv[@]}") || { _mr_usage >&2; exit 1 }
+    _mr_acquire_lock || exit 1
+    if (( _MR_JSON )); then
+      exec 5>&1 1>&2
+      _MR_JSON_FD=5
+      _mr_run_sequence ${(z)_mr_spec}
+    else
+      _mr_with_log "${(j:,:)${(z)_mr_spec}}" ${(z)_mr_spec}
+    fi
+    ;;
+esac
