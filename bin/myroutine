@@ -1,0 +1,373 @@
+#!/bin/zsh
+#
+# myroutine — 安全にコマンドを実行し、放置された要対応を可視化する routine runner
+#
+# Usage:
+#   myroutine            全ステップを順に実行
+#   myroutine ls         ステップ一覧を表示
+#   myroutine 1,3,5      指定したステップのみを指定順で実行
+#
+# ─────────────────────────────────────────────────────────────────
+# ステップ契約
+# ─────────────────────────────────────────────────────────────────
+#
+# ステップは $MYROUTINE_STEPS_DIR に「NN-name.sh」形式で 1 ファイル 1 ステップ置く。
+# 実行順はファイル名順で、ステップ番号はそこから導出される。順序を変えたいときは
+# ファイルをリネームするだけでよく、本体を含め他のどこも触らない。
+#
+#   # steps.d/50-brew-update.sh
+#   step_name="Brew Update"        # 必須。一覧とヘッダーに出る名前
+#   step_critical=true             # 任意 (既定 false)。失敗しても後続は続行するが、
+#                                  #   要対応サマリに critical として記録される
+#   step_abort_on_fail=true        # 任意 (既定 false)。失敗したら「続行しますか?」を尋ねる
+#
+#   step_run() { ... }             # 必須。終了コード 0 が成功
+#
+# ステップ本体から使えるもの:
+#
+#   ok "..." / warn "..." / err "..." / info "..."   出力ヘルパー
+#   add_action "<人がこれからやること>"              要対応サマリに載る
+#   add_info   "<自動処理済みの事後報告>"            情報セクションに載る
+#
+# add_action / add_info にステップ番号は渡さない。実行中のステップ番号は本体が付与する。
+#
+# 🔴 ステップファイルはトップレベルで副作用を持たせないこと。
+#    本体は「メタデータの読み取り」と「実行」で 2 回 source する。トップレベルに
+#    置いてよいのは step_* 変数の代入と関数定義だけで、実処理は step_run に書く。
+#
+# ─────────────────────────────────────────────────────────────────
+# 設定
+# ─────────────────────────────────────────────────────────────────
+#
+#   MYROUTINE_STEPS_DIR   ステップ置き場   既定 ${XDG_CONFIG_HOME:-~/.config}/myroutine/steps.d
+#   MYROUTINE_LOG_DIR     日次ログ置き場   既定 ${XDG_STATE_HOME:-~/.local/state}/myroutine
+#   NO_COLOR              設定すると ANSI カラーを無効化する
+#
+
+emulate -R zsh
+setopt pipefail
+
+: ${MYROUTINE_STEPS_DIR:=${XDG_CONFIG_HOME:-$HOME/.config}/myroutine/steps.d}
+: ${MYROUTINE_LOG_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/myroutine}
+
+# --- 配色 ---
+if [[ -z ${NO_COLOR:-} ]]; then
+  _MR_C_RESET=$'\e[0m'; _MR_C_BOLD=$'\e[1m'; _MR_C_DIM=$'\e[2m'
+  _MR_C_RED=$'\e[31m'; _MR_C_GREEN=$'\e[32m'; _MR_C_YELLOW=$'\e[33m'; _MR_C_CYAN=$'\e[36m'
+else
+  _MR_C_RESET=""; _MR_C_BOLD=""; _MR_C_DIM=""
+  _MR_C_RED=""; _MR_C_GREEN=""; _MR_C_YELLOW=""; _MR_C_CYAN=""
+fi
+
+# --- ステップに公開する出力ヘルパー ---
+ok()   { print -r -- "  ${_MR_C_GREEN}✓${_MR_C_RESET} $1" }
+warn() { print -r -- "  ${_MR_C_YELLOW}${_MR_C_BOLD}▸ $1${_MR_C_RESET}" }
+err()  { print -r -- "  ${_MR_C_RED}✗ $1${_MR_C_RESET}" }
+info() { print -r -- "  $1" }
+
+# --- ステップに公開する報告 API ---
+#
+# ステップはサブシェルで実行されるため、親の配列を直接は変更できない。
+# fd 3 のチャネルへ 1 行ずつ書き、親側の _mr_drain が回収する。
+# ステップ番号は _MR_STEP_NUM から本体が付与するので、ステップは番号を意識しない。
+add_action() {
+  [[ -n ${1:-} ]] || { print -ru2 -- "add_action: 本文が空です"; return 1 }
+  print -r -- "A"$'\t'"${_MR_STEP_NUM}"$'\t'"$1" >&3
+}
+add_info() {
+  [[ -n ${1:-} ]] || { print -ru2 -- "add_info: 本文が空です"; return 1 }
+  print -r -- "I"$'\t'"${_MR_STEP_NUM}"$'\t'"$1" >&3
+}
+
+# --- 収集した報告 ---
+typeset -ga _mr_actions=() _mr_infos=()
+# --- 探索したステップ (すべて 1 始まりで添字が揃う) ---
+typeset -ga _mr_step_files=() _mr_step_names=() _mr_step_critical=() _mr_step_abort=()
+# --- 直近ステップの生の終了コード (critical 判定で握り潰される前の値) ---
+typeset -g _mr_last_step_rc=0
+
+# ─────────────────────────────────────────────────────────────────
+# ステップの探索とメタデータ読み取り
+# ─────────────────────────────────────────────────────────────────
+
+# ステップファイルを 1 つサブシェルで source し、メタデータだけを取り出す。
+# 契約違反 (トップレベルの出力) が結果を汚さないよう stdout は捨て、
+# メタデータは fd 4 で取り出す。
+_mr_read_meta() {
+  local file=$1 out="" rc=0
+  out=$(
+    exec 4>&1 1>/dev/null
+    step_name=""
+    step_critical=false
+    step_abort_on_fail=false
+    source "$file" || exit 10
+    [[ -n $step_name ]] || exit 11
+    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}" >&4
+  ) || rc=$?
+  case $rc in
+    0)  print -r -- "$out"; return 0 ;;
+    10) print -ru2 -- "ERROR: ステップの読み込みに失敗しました: $file" ;;
+    11) print -ru2 -- "ERROR: step_name が定義されていません: $file" ;;
+    *)  print -ru2 -- "ERROR: メタデータの取得に失敗しました (rc=$rc): $file" ;;
+  esac
+  return 1
+}
+
+_mr_discover() {
+  if [[ ! -d $MYROUTINE_STEPS_DIR ]]; then
+    print -ru2 -- "ERROR: ステップディレクトリがありません: $MYROUTINE_STEPS_DIR"
+    return 1
+  fi
+  _mr_step_files=($MYROUTINE_STEPS_DIR/[0-9]*.sh(N))
+  if (( ${#_mr_step_files} == 0 )); then
+    print -ru2 -- "ERROR: ステップがありません: $MYROUTINE_STEPS_DIR"
+    print -ru2 -- "       NN-name.sh 形式のファイルを置いてください（例: 10-network.sh）"
+    return 1
+  fi
+  local f="" meta=""
+  for f in $_mr_step_files; do
+    meta=$(_mr_read_meta "$f") || return 1
+    _mr_step_names+=("${${(s:	:)meta}[1]}")
+    _mr_step_critical+=("${${(s:	:)meta}[2]}")
+    _mr_step_abort+=("${${(s:	:)meta}[3]}")
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 実行
+# ─────────────────────────────────────────────────────────────────
+
+# ステップをサブシェルで実行する。変数・関数の定義は次のステップへ漏れない。
+# 終了コード: 10 = source 失敗 / 11 = step_run 未定義 / それ以外は step_run の rc
+_mr_exec_step() {
+  local file=$1 num=$2 chan=$3
+  (
+    typeset -g _MR_STEP_NUM=$num
+    exec 3>>"$chan"
+    source "$file" || exit 10
+    (( ${+functions[step_run]} )) || exit 11
+    step_run
+  )
+}
+
+# チャネルに溜まった報告を親の配列へ取り込む
+_mr_drain() {
+  local chan=$1 kind="" num="" text=""
+  [[ -s $chan ]] || return 0
+  while IFS=$'\t' read -r kind num text; do
+    case $kind in
+      A) _mr_actions+=("${num}"$'\t'"${text}") ;;
+      I) _mr_infos+=("${num}"$'\t'"${text}") ;;
+    esac
+  done < "$chan"
+}
+
+_mr_hdr() {
+  print -r -- ""
+  print -r -- "${_MR_C_CYAN}${_MR_C_BOLD}━━━━━ [$1/$2] $3 ━━━━━━━━━━━━━━━━━━━━━${_MR_C_RESET}"
+}
+
+_mr_run_step() {
+  local n=$1
+  local total=${#_mr_step_files}
+  if (( n < 1 || n > total )); then
+    print -ru2 -- "ERROR: ステップ $n は存在しません（1〜${total}）"
+    _mr_last_step_rc=1
+    return 1
+  fi
+
+  local name=${_mr_step_names[$n]}
+  _mr_hdr "$n" "$total" "$name"
+
+  local chan="$_MR_TMPDIR/chan"
+  : > "$chan"
+  local rc=0
+  _mr_exec_step "${_mr_step_files[$n]}" "$n" "$chan" || rc=$?
+  _mr_drain "$chan"
+  _mr_last_step_rc=$rc
+
+  (( rc == 0 )) && return 0
+
+  case $rc in
+    10) err "ステップの読み込みに失敗しました" ;;
+    11) err "step_run が定義されていません" ;;
+    *)  err "${name} に失敗しました (rc=${rc})" ;;
+  esac
+
+  # critical は「中断する」フラグではなく「続行するが要対応として記録する」フラグ
+  if [[ ${_mr_step_critical[$n]} == true ]]; then
+    _mr_actions+=("${n}"$'\t'"${name} が失敗（critical）— 要確認")
+    return 1
+  fi
+  return 0
+}
+
+# 失敗したステップが step_abort_on_fail を宣言していれば続行可否を尋ねる。
+# tty が取れない環境では中止側に倒す (fail-closed)。
+# 戻り値 0 = 続行 / 1 = 中断
+_mr_maybe_abort() {
+  local n=$1
+  [[ ${_mr_step_abort[$n]} == true ]] || return 0
+  (( _mr_last_step_rc != 0 )) || return 0
+
+  print -r -- ""
+  print -rn -- "  ${_MR_C_YELLOW}${_MR_C_BOLD}続行しますか? [y/N]:${_MR_C_RESET} "
+  local ans=""
+  # /dev/tty が開けない環境ではリダイレクト自体がシェルのエラーになる。read の
+  # stderr だけを潰しても漏れるため、ブロックごと黙らせたうえで中止側へ倒す。
+  { read -k 1 ans </dev/tty } 2>/dev/null || ans="n"
+  print -r -- ""
+  if [[ $ans != [yY] ]]; then
+    print -r -- "  中断します。"
+    # 中断は「クリーンに終わった」ではない。サマリだけを見る人に伝わるよう残す。
+    _mr_actions+=("${n}"$'\t'"${_mr_step_names[$n]} の失敗により中断した — 原因を解消して再実行する")
+    return 1
+  fi
+  info "続行します..."
+  return 0
+}
+
+_mr_run_sequence() {
+  local -a seq=("$@")
+  local overall=0 n=""
+  for n in $seq; do
+    _mr_run_step "$n" || overall=1
+    if ! _mr_maybe_abort "$n"; then
+      _mr_summary
+      return 1
+    fi
+  done
+  _mr_summary
+  return $overall
+}
+
+# ─────────────────────────────────────────────────────────────────
+# サマリ
+# ─────────────────────────────────────────────────────────────────
+
+# 要対応と情報を別枠にする理由:
+#   要対応ボックスは「人間がこれから何をすべきか」の置き場。自動実行済みの
+#   事後報告を混ぜると対応必須項目が埋もれる。かといってステップ本文だけでは
+#   流し読みで見落とすため、第 3 の枠として情報セクションを設ける。
+_mr_summary() {
+  print -r -- ""
+  print -r -- "${_MR_C_BOLD}════════════════════════════════════════════${_MR_C_RESET}"
+  if (( ${#_mr_actions} == 0 )); then
+    print -r -- "${_MR_C_GREEN}${_MR_C_BOLD}  ✓ 要対応なし — すべてクリーン${_MR_C_RESET}"
+  else
+    print -r -- "${_MR_C_YELLOW}${_MR_C_BOLD}  ⚠ 要対応 ${#_mr_actions} 件${_MR_C_RESET}"
+    print -r -- ""
+    local a=""
+    for a in "${_mr_actions[@]}"; do
+      print -r -- "  ${_MR_C_YELLOW}${_MR_C_BOLD}▸ [${a%%$'\t'*}] ${a#*$'\t'}${_MR_C_RESET}"
+    done
+  fi
+  if (( ${#_mr_infos} > 0 )); then
+    print -r -- ""
+    print -r -- "${_MR_C_CYAN}${_MR_C_BOLD}  ℹ 情報 ${#_mr_infos} 件（対応不要）${_MR_C_RESET}"
+    print -r -- ""
+    local i=""
+    for i in "${_mr_infos[@]}"; do
+      print -r -- "  ${_MR_C_CYAN}· [${i%%$'\t'*}] ${i#*$'\t'}${_MR_C_RESET}"
+    done
+  fi
+  print -r -- "${_MR_C_BOLD}════════════════════════════════════════════${_MR_C_RESET}"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 一覧
+# ─────────────────────────────────────────────────────────────────
+
+_mr_show_list() {
+  print -r -- "${_MR_C_BOLD}myroutine ステップ一覧:${_MR_C_RESET}"
+  print -r -- "${_MR_C_DIM}  ${MYROUTINE_STEPS_DIR}${_MR_C_RESET}"
+  local total=${#_mr_step_files} n=0 mark=""
+  for (( n = 1; n <= total; n++ )); do
+    mark=""
+    [[ ${_mr_step_critical[$n]} == true ]] && mark+=" ${_MR_C_YELLOW}(critical)${_MR_C_RESET}"
+    [[ ${_mr_step_abort[$n]} == true ]] && mark+=" ${_MR_C_DIM}(失敗時に続行確認)${_MR_C_RESET}"
+    print -r -- "  ${_MR_C_CYAN}${n}.${_MR_C_RESET} ${_mr_step_names[$n]}${mark}"
+    print -r -- "     ${_MR_C_DIM}${_mr_step_files[$n]:t}${_MR_C_RESET}"
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 引数解釈
+# ─────────────────────────────────────────────────────────────────
+
+_mr_usage() {
+  print -r -- "Usage: myroutine [ls | <ステップ番号: 1,3,5>]"
+}
+
+# 「1,3,5」「1 3 5」「1, 3」いずれも受ける。数値以外が混じればエラーにし、
+# 黙って読み飛ばすことはしない。
+_mr_parse_steps() {
+  local -a raw=() out=()
+  local a="" n=""
+  for a in "$@"; do
+    raw+=(${(s:,:)${a//[[:space:]]/,}})
+  done
+  for n in $raw; do
+    [[ -z $n ]] && continue
+    if [[ $n != <-> ]]; then
+      print -ru2 -- "ERROR: ステップ番号ではありません: $n"
+      return 1
+    fi
+    out+=($n)
+  done
+  if (( ${#out} == 0 )); then
+    print -ru2 -- "ERROR: ステップ番号が指定されていません"
+    return 1
+  fi
+  print -r -- ${(j: :)out}
+}
+
+# ─────────────────────────────────────────────────────────────────
+# ログ
+# ─────────────────────────────────────────────────────────────────
+
+# 端末には色付きのまま出し、ログファイル側だけ ANSI エスケープを除去して追記する。
+# 追記なので、同日 2 回目の実行や部分実行で前回のログが消えない。
+# pipefail により、tee で終わるパイプラインでも実行結果の終了コードが伝わる。
+_mr_with_log() {
+  local label=$1; shift
+  local -a seq=("$@")
+  if ! mkdir -p "$MYROUTINE_LOG_DIR"; then
+    print -ru2 -- "ERROR: ログディレクトリを作成できません: $MYROUTINE_LOG_DIR"
+    return 1
+  fi
+  local log_file="$MYROUTINE_LOG_DIR/$(date +%Y-%m-%d).txt"
+  {
+    print -r -- "=== myroutine ${label} $(date '+%Y-%m-%d %H:%M:%S') ==="
+    _mr_run_sequence "${seq[@]}"
+  } 2>&1 | tee >(sed $'s/\e\\[[0-9;]*m//g' >> "$log_file")
+}
+
+# ─────────────────────────────────────────────────────────────────
+# main
+# ─────────────────────────────────────────────────────────────────
+
+_MR_TMPDIR=$(mktemp -d -t myroutine-XXXXXX) || {
+  print -ru2 -- "ERROR: 一時ディレクトリを作成できません"
+  exit 1
+}
+trap 'rm -rf "$_MR_TMPDIR"' EXIT INT TERM
+
+case ${1:-} in
+  -h|--help)
+    _mr_usage
+    ;;
+  ls)
+    _mr_discover || exit 1
+    _mr_show_list
+    ;;
+  "")
+    _mr_discover || exit 1
+    _mr_with_log "all" {1..${#_mr_step_files}}
+    ;;
+  *)
+    _mr_discover || exit 1
+    _mr_spec=$(_mr_parse_steps "$@") || { _mr_usage >&2; exit 1 }
+    _mr_with_log "${(j:,:)${(z)_mr_spec}}" ${(z)_mr_spec}
+    ;;
+esac
