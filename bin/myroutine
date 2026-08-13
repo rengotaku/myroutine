@@ -144,7 +144,21 @@ _mr_emit() {
     print -ru2 -- "${kind}: id に使えるのは英数字と . _ - だけです: ${id}"
     return 1
   fi
+  # チャネルは 1 行 1 レコード。本文に改行が混ざると 2 行目以降が別レコードとして
+  # 捨てられ、サマリと JSON から欠落する。タブも列を割るのでまとめて逃がす。
+  text=${text//\\/\\\\}
+  text=${text//$'\n'/\\n}
+  text=${text//$'\t'/\\t}
   print -r -- "$kind"$'\t'"${_MR_STEP_NUM}"$'\t'"${_MR_STEP_SLUG}.${id}"$'\t'"$text" >&3
+}
+
+# チャネルから読み戻すときに元へ戻す
+_mr_unescape() {
+  local t=$1
+  t=${t//\\n/$'\n'}
+  t=${t//\\t/$'\t'}
+  t=${t//\\\\/\\}
+  print -r -- "$t"
 }
 add_action() { _mr_emit A "$1" "$2" }
 add_info()   { _mr_emit I "$1" "$2" }
@@ -164,6 +178,13 @@ capture() {
   shift
   if (( $# == 0 )); then
     print -ru2 -- "capture: コマンドが指定されていません"
+    return 2
+  fi
+  # zsh の status / path のような特殊変数や readonly 変数への代入は、
+  # 呼び出し側で検知できない致命エラーになり関数ごと即座に中断する
+  # （`if ! typeset -g ...` では捕まえられない）。サブシェルで先に試して弾く。
+  if ! ( typeset -g "$__var"="" ) 2>/dev/null; then
+    err "変数に代入できません: ${__var}（予約変数・readonly の可能性）"
     return 2
   fi
   local __out="" __rc=0
@@ -219,6 +240,10 @@ typeset -ga _mr_actions=() _mr_infos=()          # "num\tid\ttext"
 typeset -ga _mr_step_files=() _mr_step_names=() _mr_step_slugs=()
 typeset -ga _mr_step_critical=() _mr_step_abort=() _mr_step_destructive=()
 typeset -ga _mr_result_status=() _mr_result_rc=() _mr_result_ms=() _mr_result_note=()
+# 実際に実行して要対応の有無を評価できたステップの slug。
+# skip したステップの要対応は「今回出なかった」のではなく「見ていない」ので、
+# 解消判定と連続日数から除外する必要がある。
+typeset -ga _mr_evaluated=()
 typeset -g _mr_last_step_rc=0
 typeset -g _MR_FULL_RUN=0
 
@@ -277,6 +302,12 @@ _mr_discover() {
     _mr_step_abort+=("${parts[3]}")
     _mr_step_destructive+=("${parts[4]}")
     slug=$(_mr_slug_of "$f")
+    # slug は action id の前置に使われ、履歴ではカンマ区切りで並ぶ。
+    # 区切り文字が混ざると連続日数・NEW・解消の追跡が壊れる。
+    if [[ -z $slug || ! $slug =~ '^[A-Za-z0-9_.-]+$' ]]; then
+      print -ru2 -- "ERROR: ステップ slug に使えるのは英数字と . _ - だけです: ${slug} (${f:t})"
+      return 1
+    fi
     if (( ${seen_slugs[(Ie)$slug]} )); then
       print -ru2 -- "ERROR: ステップ slug が重複しています: ${slug} (${f:t})"
       print -ru2 -- "       slug は要対応 id の前置に使うため一意である必要があります"
@@ -307,11 +338,14 @@ _mr_acquire_lock() {
       print -ru2 -- "ERROR: myroutine は既に実行中です (pid=${other})"
       return 1
     fi
+    # 単に rm -rf すると、2 プロセスが同時に残留を検知したとき、片方が
+    # 取り直した新しいロックをもう片方が消してしまい多重実行になる。
+    # rename は原子的なので、退避に成功した 1 プロセスだけが回収する。
     print -ru2 -- "警告: 残留ロックを回収します (pid=${other:-unknown})"
-    rm -rf "$lock" || {
-      print -ru2 -- "ERROR: 残留ロックを削除できません: $lock"
-      return 1
-    }
+    local tomb="${lock}.stale.$$"
+    if mv "$lock" "$tomb" 2>/dev/null; then
+      rm -rf "$tomb"
+    fi
   done
   print -ru2 -- "ERROR: ロックを取得できません: $lock"
   return 1
@@ -465,12 +499,15 @@ _mr_run_with_timeout() {
 }
 
 _mr_drain() {
-  local chan=$1 kind="" num="" a="" b=""
+  local chan=$1 line="" kind="" num="" a="" b=""
   [[ -s $chan ]] || return 0
-  while IFS=$'\t' read -r kind num a b; do
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    local -a f=("${(@s:	:)line}")
+    kind=${f[1]}; num=${f[2]:-}; a=${f[3]:-}; b=${f[4]:-}
     case $kind in
-      A) _mr_actions+=("${num}"$'\t'"${a}"$'\t'"${b}") ;;
-      I) _mr_infos+=("${num}"$'\t'"${a}"$'\t'"${b}") ;;
+      A) _mr_actions+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
+      I) _mr_infos+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
       V)
         if (( a == 0 && b != 0 )); then
           err "step_run は成功したが step_verify が失敗した (検証を優先して失敗扱い)"
@@ -501,6 +538,7 @@ _mr_record() {
   _mr_result_rc[$1]=$3
   _mr_result_ms[$1]=$4
   _mr_result_note[$1]=$5
+  [[ $2 != skip ]] && _mr_evaluated+=("${_mr_step_slugs[$1]}")
 }
 
 _mr_run_step() {
@@ -623,9 +661,15 @@ _mr_run_sequence() {
 # 履歴と劣化検知
 # ─────────────────────────────────────────────────────────────────
 #
-# 履歴は「実行日 <TAB> 時刻 <TAB> action id のカンマ区切り」の TSV で追記する。
-# 部分実行 (myroutine 2,3) は要対応の集合が欠けるため履歴に記録しない。
-# 記録すると「今日は出なかった」と誤って解消扱いになり、連続日数が壊れる。
+# 履歴は「実行日 <TAB> 時刻 <TAB> action id のカンマ区切り <TAB> 評価できた slug の
+# カンマ区切り」の TSV で追記する。
+#
+# 4 列目が要る理由: skip されたステップの要対応は「今回出なかった」のではなく
+# 「見ていない」。区別しないと、前提コマンドが一時的に無いだけで前回の要対応が
+# 誤って「解消」になり、連続日数も失われる。4 列目が空 or "*" の行は旧形式として
+# 「全ステップを評価した」とみなす。
+#
+# 部分実行 (myroutine 2,3) と中断した実行は、そもそも記録しない。
 
 _mr_history_file() { print -r -- "$MYROUTINE_LOG_DIR/history.tsv" }
 
@@ -643,23 +687,36 @@ _mr_current_ids() {
 _mr_history_days() {
   local hf=$(_mr_history_file)
   [[ -f $hf ]] || return 0
-  local -A byday=()
+  local -A byday=() byeval=()
   local -a order=()
-  local line="" d="" ids=""
-  while IFS=$'\t' read -r d _ ids; do
-    [[ -n $d ]] || continue
+  local line="" d="" ids="" evals=""
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    local -a f=("${(@s:	:)line}")
+    d=${f[1]}; ids=${f[3]:-}; evals=${f[4]:-}
     # 値の空判定だと「その日の 1 回目が要対応ゼロ」のときに同じ日を
     # 二重に数え、連続日数が水増しされる。キーの有無で初出を判定する。
     if (( ! ${+byday[$d]} )); then order+=("$d"); fi
     byday[$d]=$ids
+    byeval[$d]=${evals:-\*}
   done < "$hf"
   local i=0
   for (( i = ${#order}; i >= 1; i-- )); do
-    print -r -- "${order[$i]}"$'\t'"${byday[${order[$i]}]}"
+    print -r -- "${order[$i]}"$'\t'"${byday[${order[$i]}]}"$'\t'"${byeval[${order[$i]}]}"
   done
 }
 
+# その日にそのステップを評価できたか（旧形式・空欄は「評価した」とみなす）
+_mr_day_evaluated() {
+  local field=$1 slug=$2
+  [[ -z $field || $field == '*' ]] && return 0
+  local -a l=(${(s:,:)field})
+  (( ${l[(Ie)$slug]} ))
+}
+
 _mr_analyze_history() {
+  # 部分実行・中断は要対応の集合が欠けるため、比較の土台にできない
+  (( _MR_FULL_RUN )) || return 0
   local today=$(date +%Y-%m-%d)
   local -a cur=(${(f)"$(_mr_current_ids)"})
   local -a days=(${(f)"$(_mr_history_days)"})
@@ -674,10 +731,13 @@ _mr_analyze_history() {
 
   local id=""
   for id in $cur; do
-    local streak=1 entry="" entry_ids=""
+    local streak=1 entry=""
+    local slug=${id%%.*}
     for entry in $past; do
-      entry_ids=${entry#*$'\t'}
-      local -a ids=(${(s:,:)entry_ids})
+      local -a col=("${(@s:	:)entry}")
+      # そのステップを評価していない日は、連続を切りも伸ばしもしない
+      _mr_day_evaluated "${col[3]}" "$slug" || continue
+      local -a ids=(${(s:,:)col[2]})
       if (( ${ids[(Ie)$id]} )); then
         (( streak++ ))
       else
@@ -687,14 +747,18 @@ _mr_analyze_history() {
     _mr_streak[$id]=$streak
   done
 
-  # 直前の実行日と比べて新規 / 解消を出す
+  # 直前の実行日と比べて新規 / 解消を出す。
+  # 今回評価していないステップの要対応は「見ていない」だけなので触らない。
   if (( ${#past} > 0 )); then
-    local -a prev=(${(s:,:)${past[1]#*$'\t'}})
+    local -a pcol=("${(@s:	:)past[1]}")
+    local -a prev=(${(s:,:)pcol[2]})
     for id in $cur; do
+      _mr_day_evaluated "${pcol[3]}" "${id%%.*}" || continue
       (( ${prev[(Ie)$id]} )) || _mr_new_ids+=("$id")
     done
     for id in $prev; do
       [[ -z $id ]] && continue
+      (( ${_mr_evaluated[(Ie)${id%%.*}]} )) || continue
       (( ${cur[(Ie)$id]} )) || _mr_resolved_ids+=("$id")
     done
   fi
@@ -703,7 +767,8 @@ _mr_analyze_history() {
 _mr_append_history() {
   local hf=$(_mr_history_file)
   local -a cur=(${(f)"$(_mr_current_ids)"})
-  print -r -- "$(date +%Y-%m-%d)"$'\t'"$(date +%H:%M:%S)"$'\t'"${(j:,:)cur}" >> "$hf"
+  local -aU ev=(${_mr_evaluated})
+  print -r -- "$(date +%Y-%m-%d)"$'\t'"$(date +%H:%M:%S)"$'\t'"${(j:,:)cur}"$'\t'"${(j:,:)ev}" >> "$hf"
 }
 
 # ─────────────────────────────────────────────────────────────────

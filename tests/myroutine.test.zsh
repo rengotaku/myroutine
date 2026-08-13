@@ -221,6 +221,23 @@ assert_contains "$out" "成功時に値が入る"                     "capture: 
 assert_contains "$out" "失敗時は非 0 を返し変数を書き換えない" "capture: 失敗を検知し変数を汚さない"
 assert_contains "$out" "-d で既定値を明示できる"              "capture: 既定値を明示できる"
 
+# zsh の status / path のような特殊変数は readonly 相当で代入に失敗する。
+# ここで握り潰すと「値が入っていないのに成功」になり、capture の存在意義が崩れる。
+newenv
+mkstep 10-capro.sh 'step_name="予約変数への capture"
+step_critical=true
+step_run() {
+  if capture status printf hello; then
+    err "代入に失敗したのに成功を返した"
+    return 1
+  fi
+  ok "代入失敗を検知した"
+  return 0
+}'
+out=$(mr)
+assert_contains "$out" "代入失敗を検知した"     "capture: 予約変数への代入失敗を検知する"
+assert_contains "$out" "変数に代入できません" "capture: 代入できない理由を示す"
+
 newenv
 mkstep 10-caprc.sh 'step_name="capture の rc"
 step_run() { local v=""; capture v sh -c "exit 5"; return $? }'
@@ -609,6 +626,93 @@ step_run() { add_action stuck "残っている" }'
 out=$(mr)
 assert_contains "$out" "(3 日連続)"     "履歴: 同日の複数行を 1 日として数える"
 assert_not_contains "$out" "(4 日連続)" "履歴: 同日の複数行で日数が水増しされない"
+
+# ─────────────────────────────────────────────────────────────────
+group "評価していないステップを解消扱いしない"
+# ─────────────────────────────────────────────────────────────────
+
+# 前提コマンドが（一時的にでも）無くて skip されたステップの要対応は
+# 「今回出なかった」のではなく「見ていない」。解消にしてはいけない。
+newenv
+mkstep 10-gone.sh 'step_name="前提なし"
+step_requires=(this-command-does-not-exist-7b21)
+step_run() { add_action stuck "見ていない要対応" }'
+mkstep 20-live.sh 'step_name="動く"
+step_run() { add_action other "今日の要対応" }'
+print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"gone.stuck,live.other"$'\t'"gone,live" \
+  > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr)
+assert_not_contains "$out" "解消: gone.stuck" "skip: 評価していないステップを解消扱いしない"
+
+# 逆に、評価したうえで消えたものは解消として出る
+newenv
+mkstep 10-live.sh 'step_name="動く"
+step_run() { ok done }'
+print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"live.stuck"$'\t'"live" \
+  > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr)
+assert_contains "$out" "解消: live.stuck" "skip: 評価したうえで消えたものは解消として出る"
+
+# 評価していない日は連続日数を切りも伸ばしもしない
+newenv
+mkstep 10-s.sh 'step_name="滞留"
+step_run() { add_action stuck "残っている" }'
+{
+  print -r -- "2026-08-10"$'\t'"09:00:00"$'\t'"s.stuck"$'\t'"s"
+  print -r -- "2026-08-11"$'\t'"09:00:00"$'\t'""$'\t'"other"
+  print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"s.stuck"$'\t'"s"
+} > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr)
+assert_contains "$out" "(3 日連続)" "履歴: 評価していない日は連続を切らない（その日は数に入らない）"
+
+# 部分実行では解消判定そのものを行わない
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { add_action a "A" }'
+mkstep 20-b.sh 'step_name="B"
+step_run() { add_action b "B" }'
+print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"a.a,b.b"$'\t'"a,b" \
+  > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr 1)
+assert_not_contains "$out" "解消: b.b" "部分実行: 未選択ステップを解消扱いしない"
+
+# ─────────────────────────────────────────────────────────────────
+group "チャネルの頑健性"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-multi.sh 'step_name="複数行"
+step_run() { add_action multi "1 行目
+2 行目	タブ入り" }'
+out=$(mr)
+assert_contains "$out" "1 行目"        "チャネル: 複数行本文の 1 行目が残る"
+assert_contains "$out" "2 行目"        "チャネル: 複数行本文の 2 行目も欠落しない"
+assert_contains "$out" "⚠ 要対応 1 件" "チャネル: 複数行本文が複数レコードに割れない"
+
+newenv
+mkstep '10-bad,slug.sh' 'step_name="不正 slug"
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "slug に使えるのは" "slug: 履歴の区切り文字を含む slug を拒否する"
+
+# ─────────────────────────────────────────────────────────────────
+group "残留ロックの原子的な回収"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-slow.sh "step_name=\"遅い\"
+step_run() { print -r -- ran >> \"$MR_TD/ran.txt\"; sleep 2 }"
+mkdir -p "$MYROUTINE_LOG_DIR/lock.d"
+print -r -- "999999" > "$MYROUTINE_LOG_DIR/lock.d/pid"
+# 残留ロックがある状態で 2 プロセスが同時に起動しても、実行できるのは 1 つだけ
+"$MR" </dev/null >/dev/null 2>&1 &
+p1=$!
+"$MR" </dev/null >/dev/null 2>&1 &
+p2=$!
+wait $p1 2>/dev/null
+wait $p2 2>/dev/null
+ran=$(grep -c ran "$MR_TD/ran.txt" 2>/dev/null || print -r -- 0)
+assert_eq "$ran" "1" "lock: 残留ロックの同時回収でも実行は 1 つだけ"
 
 # ─────────────────────────────────────────────────────────────────
 group "JSON のエスケープ"
