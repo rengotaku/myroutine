@@ -367,8 +367,10 @@ _mr_exec_step() {
   (
     typeset -g _MR_STEP_NUM=$num _MR_STEP_SLUG=$slug
     exec 3>>"$chan"
-    source "$file" || exit 10
-    (( ${+functions[step_run]} )) || exit 11
+    # 10 / 11 をそのまま終了コードにすると、step_run が同じ値を返したときに
+    # 「読み込み失敗」「関数未定義」と誤表示される。内部事情はマーカーで伝える。
+    source "$file" || { print -n x > "${chan}.srcfail"; exit 10 }
+    (( ${+functions[step_run]} )) || { print -n x > "${chan}.nofunc"; exit 11 }
     local run_rc=0 v_rc=0
     step_run || run_rc=$?
     if (( ${+functions[step_verify]} )); then
@@ -396,18 +398,46 @@ _mr_descendants() {
 #   - 親を先に落とすと、孫が init へ里子に出され pgrep -P で辿れなくなる
 # どちらも起きないよう、木を全部数え上げてから一括で落とす。
 # 取りこぼした子孫はログ用パイプを掴んだまま残り、実行全体が終われなくなる。
-_mr_kill_tree() {
-  local p=$1 x=""
-  local -a all=("$p" ${(f)"$(_mr_descendants "$p")"})
+# 与えられた pid 群を TERM → 猶予 → KILL の順で確実に落とす
+_mr_kill_set() {
+  local x="" i=0 alive=0
+  local -a all=("$@")
+  (( ${#all} == 0 )) && return 0
   for x in $all; do
     [[ -n $x ]] && kill -TERM "$x" 2>/dev/null
   done
+  # TERM を捕捉・無視するプロセスが残るとログ用パイプを掴んだままになり、
+  # 打ち切ったはずの実行が終われない。猶予を与えたうえで KILL に切り替える。
+  for i in {1..10}; do
+    alive=0
+    for x in $all; do
+      [[ -n $x ]] && kill -0 "$x" 2>/dev/null && alive=1
+    done
+    (( alive )) || return 0
+    sleep 0.2
+  done
+  for x in $all; do
+    [[ -n $x ]] && kill -KILL "$x" 2>/dev/null
+  done
 }
+
+_mr_kill_tree() { _mr_kill_set "$1" ${(f)"$(_mr_descendants "$1")"} }
+
+# 自分自身は残したまま、配下のプロセスだけを落とす。
+# ログ用パイプの左側は別プロセスなので、シグナル受信時はこちらで畳む必要がある
+# （実行中ステップの pid はそのサブシェル内の変数で、親からは見えない）。
+_mr_kill_descendants() { _mr_kill_set ${(f)"$(_mr_descendants "$1")"} }
+
+# 打ち切りが起きたかどうかは終了コードではなくこのフラグで伝える。
+# ステップ自身が 124 を返すこともあるため、値で区別してはいけない。
+typeset -g _mr_timed_out=0
+typeset -g _MR_CURRENT_PID=""
 
 _mr_run_with_timeout() {
   local file=$1 num=$2 slug=$3 chan=$4 limit=$5
   local mark="$_MR_TMPDIR/timeout.$num"
-  rm -f "$mark"
+  rm -f "$mark" "${chan}.srcfail" "${chan}.nofunc"
+  _mr_timed_out=0
 
   if (( limit <= 0 )); then
     local rc=0
@@ -417,6 +447,7 @@ _mr_run_with_timeout() {
 
   _mr_exec_step "$file" "$num" "$slug" "$chan" &
   local pid=$!
+  _MR_CURRENT_PID=$pid
   # 監視プロセスの出力は握り潰す。ログ用パイプを掴んだまま残ると、
   # 監視が生き残っている間パイプラインが終了できなくなる。
   { sleep "$limit"; print -n x > "$mark"; _mr_kill_tree "$pid" } >/dev/null 2>&1 &
@@ -427,8 +458,9 @@ _mr_run_with_timeout() {
   # kill だけでは監視サブシェルの子 (sleep) が孤児として残る。子孫ごと落とす。
   _mr_kill_tree "$watchdog"
   wait "$watchdog" 2>/dev/null
+  _MR_CURRENT_PID=""
 
-  [[ -e $mark ]] && return 124
+  [[ -e $mark ]] && _mr_timed_out=1
   return $rc
 }
 
@@ -530,14 +562,20 @@ _mr_run_step() {
     return 0
   fi
 
-  case $rc in
-    10)  err "ステップの読み込みに失敗しました" ;;
-    11)  err "step_run が定義されていません" ;;
-    124) err "${name} がタイムアウトしました (${limit}s)" ;;
-    *)   err "${name} に失敗しました (rc=${rc})" ;;
-  esac
-  (( rc == 124 )) && _mr_record "$n" timeout "$rc" "$ms" "${limit}s" \
-                  || _mr_record "$n" fail "$rc" "$ms" ""
+  # 終了コードの値で内部事情を判別しない（ステップが同じ値を返しうる）
+  if (( _mr_timed_out )); then
+    err "${name} がタイムアウトしました (${limit}s)"
+    _mr_record "$n" timeout "$rc" "$ms" "${limit}s"
+  elif [[ -e "${chan}.srcfail" ]]; then
+    err "ステップの読み込みに失敗しました"
+    _mr_record "$n" fail "$rc" "$ms" "source failed"
+  elif [[ -e "${chan}.nofunc" ]]; then
+    err "step_run が定義されていません"
+    _mr_record "$n" fail "$rc" "$ms" "step_run undefined"
+  else
+    err "${name} に失敗しました (rc=${rc})"
+    _mr_record "$n" fail "$rc" "$ms" ""
+  fi
 
   # critical は「中断する」フラグではなく「続行するが要対応として記録する」フラグ
   if [[ ${_mr_step_critical[$n]} == true ]]; then
@@ -570,6 +608,9 @@ _mr_run_sequence() {
   for n in $seq; do
     _mr_run_step "$n" || overall=1
     if ! _mr_maybe_abort "$n"; then
+      # 後続ステップを実行していないため要対応の集合が欠けている。
+      # このまま記録すると次回に既存の要対応が誤って「解消」扱いになる。
+      _MR_FULL_RUN=0
       _mr_finish 1
       return 1
     fi
@@ -607,7 +648,9 @@ _mr_history_days() {
   local line="" d="" ids=""
   while IFS=$'\t' read -r d _ ids; do
     [[ -n $d ]] || continue
-    if [[ -z ${byday[$d]:-} ]]; then order+=("$d"); fi
+    # 値の空判定だと「その日の 1 回目が要対応ゼロ」のときに同じ日を
+    # 二重に数え、連続日数が水増しされる。キーの有無で初出を判定する。
+    if (( ! ${+byday[$d]} )); then order+=("$d"); fi
     byday[$d]=$ids
   done < "$hf"
   local i=0
@@ -733,9 +776,18 @@ _mr_json_escape() {
   local s=$1
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
-  s=${s//$'\t'/\\t}
+  s=${s//$'\b'/\\b}
+  s=${s//$'\f'/\\f}
   s=${s//$'\n'/\\n}
   s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  # 残る U+0001-U+001F（色付き出力に混じる ESC 等）も潰さないと不正な JSON になる
+  local c="" i=0
+  for i in {1..31}; do
+    case $i in 8|9|10|12|13) continue ;; esac
+    c=$(printf "\\$(printf '%03o' $i)")
+    [[ $s == *$c* ]] && s=${s//$c/$(printf '\\u%04x' $i)}
+  done
   print -r -- "$s"
 }
 
@@ -853,14 +905,24 @@ _mr_parse_steps() {
 # 端末には色付きのまま出し、ログファイル側だけ ANSI エスケープを除去して追記する。
 # 追記なので、同日 2 回目の実行や部分実行で前回のログが消えない。
 # pipefail により、tee で終わるパイプラインでも実行結果の終了コードが伝わる。
+# パイプラインを前景で走らせると、zsh は実行が終わるまで trap を保留する。
+# その間に届いた TERM / INT は子へ伝わらず、中断したはずの後続ステップが
+# そのまま実行されてしまう。background + wait なら wait が割り込まれて
+# trap が即座に走る。終了コードはパイプラインを跨げないのでファイルで返す。
 _mr_with_log() {
   local label=$1; shift
   local -a seq=("$@")
   local log_file="$MYROUTINE_LOG_DIR/$(date +%Y-%m-%d).txt"
+  local rcfile="$_MR_TMPDIR/seq.rc"
+  print -r -- 1 > "$rcfile"
   {
     print -r -- "=== myroutine ${label} $(date '+%Y-%m-%d %H:%M:%S') ==="
-    _mr_run_sequence "${seq[@]}"
-  } 2>&1 | tee >(sed $'s/\e\\[[0-9;]*m//g' >> "$log_file")
+    local r=0
+    _mr_run_sequence "${seq[@]}" || r=$?
+    print -r -- $r > "$rcfile"
+  } 2>&1 | tee >(sed $'s/\e\\[[0-9;]*m//g' >> "$log_file") &
+  wait
+  return $(<"$rcfile")
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -876,7 +938,19 @@ _MR_TMPDIR=$(mktemp -d -t myroutine-XXXXXX) || {
   print -ru2 -- "ERROR: 一時ディレクトリを作成できません"
   exit 1
 }
-trap '_mr_cleanup' EXIT INT TERM HUP PIPE
+# シグナル trap が後片付けだけして戻ると、ロックと一時ディレクトリを消したまま
+# 後続ステップが走り続ける（別プロセスの同時起動も許してしまう）。
+# 実行中のステップを落としたうえで、128 + シグナル番号で終了する。
+_mr_on_signal() {
+  _mr_kill_descendants $$
+  _mr_cleanup
+  exit $1
+}
+trap '_mr_cleanup' EXIT
+trap '_mr_on_signal 130' INT
+trap '_mr_on_signal 143' TERM
+trap '_mr_on_signal 129' HUP
+trap '_mr_on_signal 141' PIPE
 
 case ${_mr_argv[1]:-} in
   ls)

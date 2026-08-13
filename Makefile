@@ -18,8 +18,11 @@ test:
 syntax:
 	@echo "=== syntax ==="
 	@$(ZSH_BIN) -n bin/myroutine && echo "ok: bin/myroutine"
+	@# 途中のファイルが落ちてもループは続き、最後が成功すると全体が 0 になる。
+	@# 失敗したその場で抜ける。
 	@for f in examples/steps.d/*.sh; do \
-		$(ZSH_BIN) -n "$$f" && echo "ok: $$f"; \
+		$(ZSH_BIN) -n "$$f" || exit 1; \
+		echo "ok: $$f"; \
 	done
 	@$(ZSH_BIN) -n tests/myroutine.test.zsh && echo "ok: tests/myroutine.test.zsh"
 

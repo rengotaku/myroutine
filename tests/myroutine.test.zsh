@@ -534,6 +534,97 @@ out=$("$MR" --timeout abc </dev/null 2>&1)
 assert_contains "$out" "--timeout には秒数" "引数: --timeout の値を検証する"
 
 # ─────────────────────────────────────────────────────────────────
+group "終了コードの衝突（内部事情を rc で伝えない）"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-rc124.sh 'step_name="124 を返す"
+step_critical=true
+step_run() { return 124 }'
+out=$(mr)
+assert_contains "$out" "に失敗しました (rc=124)" "rc 衝突: 124 を返しても素直に失敗として扱う"
+assert_not_contains "$out" "タイムアウトしました" "rc 衝突: 124 をタイムアウトと誤表示しない"
+
+newenv
+mkstep 10-rc10.sh 'step_name="10 を返す"
+step_critical=true
+step_run() { return 10 }'
+out=$(mr)
+assert_not_contains "$out" "読み込みに失敗" "rc 衝突: 10 を読み込み失敗と誤表示しない"
+
+newenv
+mkstep 10-rc11.sh 'step_name="11 を返す"
+step_critical=true
+step_run() { return 11 }'
+out=$(mr)
+assert_not_contains "$out" "step_run が定義されていません" "rc 衝突: 11 を関数未定義と誤表示しない"
+
+# ─────────────────────────────────────────────────────────────────
+group "中断・シグナル時の一貫性"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-gate.sh 'step_name="ゲート"
+step_abort_on_fail=true
+step_run() { add_action stuck "残るはずの要対応"; return 1 }'
+mkstep 20-after.sh 'step_name="後続"
+step_run() { add_action other "後続の要対応" }'
+mr >/dev/null
+if [[ ! -s "$MYROUTINE_LOG_DIR/history.tsv" ]]; then pass "中断: 未完走の実行を履歴に記録しない"
+else fail "中断: 未完走の実行を履歴に記録しない" "$(cat "$MYROUTINE_LOG_DIR/history.tsv")"; fi
+
+newenv
+mkstep 10-slow.sh 'step_name="遅い"
+step_run() { sleep 20 }'
+mkstep 20-after.sh 'step_name="後続"
+step_run() { ok "後続が実行された" }'
+"$MR" </dev/null >"$MR_TD/sig.out" 2>&1 &
+sig_pid=$!
+sleep 1
+kill -TERM $sig_pid 2>/dev/null
+sig_rc=0
+wait $sig_pid 2>/dev/null || sig_rc=$?
+sleep 1
+if (( sig_rc != 0 )); then pass "シグナル: TERM で非 0 終了する (rc=${sig_rc})"
+else fail "シグナル: TERM で非 0 終了する" "rc=0 で正常終了した"; fi
+assert_not_contains "$(cat "$MR_TD/sig.out")" "後続が実行された" "シグナル: 受信後に後続を実行しない"
+if [[ ! -d "$MYROUTINE_LOG_DIR/lock.d" ]]; then pass "シグナル: ロックを解放する"
+else fail "シグナル: ロックを解放する" "lock.d が残っている"; fi
+if [[ -z $(pgrep -f "sleep 20" 2>/dev/null) ]]; then pass "シグナル: 実行中のステップごと落とす"
+else fail "シグナル: 実行中のステップごと落とす" "sleep 20 が生存している"; fi
+
+# ─────────────────────────────────────────────────────────────────
+group "履歴の日付集計"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-s.sh 'step_name="滞留"
+step_run() { add_action stuck "残っている" }'
+# 同じ日に 2 行あり、1 回目は要対応ゼロ。2 行を別々の実行日として数えてはいけない。
+{
+  print -r -- "2026-08-11"$'\t'"08:00:00"$'\t'""
+  print -r -- "2026-08-11"$'\t'"18:00:00"$'\t'"s.stuck"
+  print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"s.stuck"
+} > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr)
+assert_contains "$out" "(3 日連続)"     "履歴: 同日の複数行を 1 日として数える"
+assert_not_contains "$out" "(4 日連続)" "履歴: 同日の複数行で日数が水増しされない"
+
+# ─────────────────────────────────────────────────────────────────
+group "JSON のエスケープ"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-esc.sh 'step_name="制御文字"
+step_run() { add_action esc "色付き$(printf "\033")[31m出力$(printf "\010")と\"引用符\"と\\バックスラッシュ" }'
+json=$("$MR" --no-lock --json </dev/null 2>/dev/null)
+if print -r -- "$json" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+  pass "JSON: 制御文字を含む本文でも妥当な JSON"
+else
+  fail "JSON: 制御文字を含む本文でも妥当な JSON" "$json"
+fi
+
+# ─────────────────────────────────────────────────────────────────
 print -r -- ""
 print -r -- "════════════════════════════════════"
 if (( FAIL == 0 )); then
