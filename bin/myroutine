@@ -146,18 +146,23 @@ _mr_emit() {
   fi
   # チャネルは 1 行 1 レコード。本文に改行が混ざると 2 行目以降が別レコードとして
   # 捨てられ、サマリと JSON から欠落する。タブも列を割るのでまとめて逃がす。
-  text=${text//\\/\\\\}
-  text=${text//$'\n'/\\n}
-  text=${text//$'\t'/\\t}
+  #
+  # バックスラッシュ方式（\ → \\、改行 → \n）は復号が順序依存になり、本文に
+  # リテラルの "\n" が含まれると二重化した後半を改行に戻してしまう。
+  # % を先に退避するパーセント方式なら、%25 が %0A / %09 を部分文字列として
+  # 含みえないため、どちらの順で戻しても一意に復元できる。
+  text=${text//\%/%25}
+  text=${text//$'\n'/%0A}
+  text=${text//$'\t'/%09}
   print -r -- "$kind"$'\t'"${_MR_STEP_NUM}"$'\t'"${_MR_STEP_SLUG}.${id}"$'\t'"$text" >&3
 }
 
 # チャネルから読み戻すときに元へ戻す
 _mr_unescape() {
   local t=$1
-  t=${t//\\n/$'\n'}
-  t=${t//\\t/$'\t'}
-  t=${t//\\\\/\\}
+  t=${t//\%0A/$'\n'}
+  t=${t//\%09/$'\t'}
+  t=${t//\%25/%}
   print -r -- "$t"
 }
 add_action() { _mr_emit A "$1" "$2" }
@@ -304,8 +309,11 @@ _mr_discover() {
     slug=$(_mr_slug_of "$f")
     # slug は action id の前置に使われ、履歴ではカンマ区切りで並ぶ。
     # 区切り文字が混ざると連続日数・NEW・解消の追跡が壊れる。
-    if [[ -z $slug || ! $slug =~ '^[A-Za-z0-9_.-]+$' ]]; then
-      print -ru2 -- "ERROR: ステップ slug に使えるのは英数字と . _ - だけです: ${slug} (${f:t})"
+    # slug は action id に "<slug>.<id>" の形で前置される。slug 自身がドットを
+    # 含むと id からの復元（最初のドットまで）が壊れ、連続日数・NEW・解消の
+    # 判定対象から漏れる。履歴の区切り文字も入れられない。
+    if [[ -z $slug || ! $slug =~ '^[A-Za-z0-9_-]+$' ]]; then
+      print -ru2 -- "ERROR: ステップ slug に使えるのは英数字と _ - だけです: ${slug} (${f:t})"
       return 1
     fi
     if (( ${seen_slugs[(Ie)$slug]} )); then
@@ -538,7 +546,10 @@ _mr_record() {
   _mr_result_rc[$1]=$3
   _mr_result_ms[$1]=$4
   _mr_result_note[$1]=$5
-  [[ $2 != skip ]] && _mr_evaluated+=("${_mr_step_slugs[$1]}")
+  # 失敗・タイムアウトしたステップは要対応の有無を確認しきれていない。
+  # skip と同じく「見ていない」側に置かないと、判定前に落ちただけで
+  # 前回の要対応が「解消」と誤表示され、連続日数も途切れる。
+  [[ $2 == ok ]] && _mr_evaluated+=("${_mr_step_slugs[$1]}")
 }
 
 _mr_run_step() {
@@ -721,13 +732,18 @@ _mr_analyze_history() {
   local -a cur=(${(f)"$(_mr_current_ids)"})
   local -a days=(${(f)"$(_mr_history_days)"})
 
-  # 今日の実行分は履歴書き込み前なので、過去日だけを見る
+  # 連続「日数」は当日を数えないので、streak の走査からは当日を外す。
   local -a past=()
   local d=""
   for d in $days; do
     [[ ${d%%$'\t'*} == $today ]] && continue
     past+=("$d")
   done
+  # NEW / 解消 は「前回の実行」との比較なので、当日の先行実行があればそれを使う。
+  # 当日を一律に除外すると、朝に出た要対応が午後も NEW と表示され、
+  # 午後に消えても解消が出ない。
+  local prev_entry=""
+  (( ${#days} > 0 )) && prev_entry=${days[1]}
 
   local id=""
   for id in $cur; do
@@ -747,10 +763,10 @@ _mr_analyze_history() {
     _mr_streak[$id]=$streak
   done
 
-  # 直前の実行日と比べて新規 / 解消を出す。
+  # 直前の実行と比べて新規 / 解消を出す。
   # 今回評価していないステップの要対応は「見ていない」だけなので触らない。
-  if (( ${#past} > 0 )); then
-    local -a pcol=("${(@s:	:)past[1]}")
+  if [[ -n $prev_entry ]]; then
+    local -a pcol=("${(@s:	:)prev_entry}")
     local -a prev=(${(s:,:)pcol[2]})
     for id in $cur; do
       _mr_day_evaluated "${pcol[3]}" "${id%%.*}" || continue

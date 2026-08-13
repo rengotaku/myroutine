@@ -690,10 +690,71 @@ assert_contains "$out" "2 行目"        "チャネル: 複数行本文の 2 行
 assert_contains "$out" "⚠ 要対応 1 件" "チャネル: 複数行本文が複数レコードに割れない"
 
 newenv
+mkstep 10-esc2.sh 'step_name="リテラルのエスケープ列"
+step_run() { add_action lit "literal\nend と literal\ttab" }'
+out=$(mr)
+assert_contains "$out" 'literal\nend' "チャネル: 本文中のリテラル \\n を改行に化けさせない"
+assert_contains "$out" 'literal\ttab' "チャネル: 本文中のリテラル \\t をタブに化けさせない"
+
+newenv
 mkstep '10-bad,slug.sh' 'step_name="不正 slug"
 step_run() { : }'
 out=$(mr ls)
 assert_contains "$out" "slug に使えるのは" "slug: 履歴の区切り文字を含む slug を拒否する"
+
+# slug にドットがあると action id "<slug>.<id>" から slug を復元できず、
+# 連続日数・NEW・解消の判定対象から漏れる
+newenv
+mkstep '10-dot.slug.sh' 'step_name="ドット付き slug"
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "slug に使えるのは" "slug: ドットを含む slug を拒否する"
+
+# ─────────────────────────────────────────────────────────────────
+group "評価しきれなかったステップの扱い"
+# ─────────────────────────────────────────────────────────────────
+
+# 失敗したステップは要対応の有無を確認しきれていない。skip と同じく
+# 「見ていない」側に置かないと、判定前に落ちただけで解消と誤表示される。
+newenv
+mkstep 10-broken.sh 'step_name="途中で落ちる"
+step_critical=true
+step_run() { return 1 }'
+print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"broken.stuck"$'\t'"broken" \
+  > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr)
+assert_not_contains "$out" "解消: broken.stuck" "失敗: 評価しきれなかったステップを解消扱いしない"
+
+newenv
+mkstep 10-hang2.sh 'step_name="打ち切られる"
+step_timeout=1
+step_run() { sleep 20 }'
+print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"hang2.stuck"$'\t'"hang2" \
+  > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr)
+assert_not_contains "$out" "解消: hang2.stuck" "タイムアウト: 評価しきれなかったステップを解消扱いしない"
+
+# ─────────────────────────────────────────────────────────────────
+group "同日 2 回目の NEW / 解消"
+# ─────────────────────────────────────────────────────────────────
+
+# NEW / 解消 は「前回の実行」との比較。当日の先行実行を一律に無視すると、
+# 朝に出た要対応が午後も NEW と表示され、午後に消えても解消が出ない。
+newenv
+mkstep 10-s.sh 'step_name="滞留"
+step_run() { add_action stuck "残っている" }'
+print -r -- "$(date +%Y-%m-%d)"$'\t'"08:00:00"$'\t'"s.stuck"$'\t'"s" \
+  > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr)
+assert_not_contains "$out" "NEW" "同日 2 回目: 朝に出ていた要対応を NEW にしない"
+
+newenv
+mkstep 10-s.sh 'step_name="解消済み"
+step_run() { ok done }'
+print -r -- "$(date +%Y-%m-%d)"$'\t'"08:00:00"$'\t'"s.gone"$'\t'"s" \
+  > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr)
+assert_contains "$out" "解消: s.gone" "同日 2 回目: 午後に消えたものを解消として出す"
 
 # ─────────────────────────────────────────────────────────────────
 group "残留ロックの原子的な回収"
