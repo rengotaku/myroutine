@@ -13,6 +13,7 @@
 #       --json        結果を機械可読な JSON で出力する
 #       --timeout N   ステップの既定タイムアウト秒 (0 で無制限)
 #       --no-lock     多重起動ロックを取らない (テスト用)
+#       --force-cadence  step_cadence の間隔判定を無視して実行する
 #   -h, --help        使い方を表示する
 #
 # ─────────────────────────────────────────────────────────────────
@@ -33,6 +34,11 @@
 #   step_requires=(brew git)       # 任意。無いコマンドがあれば失敗ではなく skip
 #   step_requires_path=(~/foo)     # 任意。無いパスがあれば失敗ではなく skip
 #   step_timeout=300               # 任意。0 で無制限。既定は --timeout / 600 秒
+#   step_cadence=weekly            # 任意 (既定 daily)。daily / weekly / biweekly /
+#                                  #   monthly。前回成功日からの間隔が足りなければ
+#                                  #   失敗ではなく skip。--force-cadence で無視する
+#   step_cadence_weekday=fri       # 任意。指定すると「間隔を満たし、かつその曜日」の
+#                                  #   ときだけ実行する（mon..sun / 1..7、1=月曜）
 #
 #   step_run()    { ... }          # 必須。終了コード 0 が成功
 #   step_verify() { ... }          # 任意。定義されていれば step_run の終了コードより
@@ -64,6 +70,7 @@
 #   MYROUTINE_LOG_DIR     状態・ログ置き場 既定 ${XDG_STATE_HOME:-~/.local/state}/myroutine
 #   MYROUTINE_TIMEOUT     既定タイムアウト秒 (既定 600、0 で無制限)
 #   MYROUTINE_STREAK_WARN 何日連続で滞留したら強調するか (既定 3)
+#   MYROUTINE_NOW_EPOCH   「今」を固定する epoch 秒 (テスト用。既定は現在時刻)
 #   NO_COLOR              設定すると ANSI カラーを無効化する
 #
 
@@ -75,7 +82,7 @@ setopt pipefail
 : ${MYROUTINE_TIMEOUT:=600}
 : ${MYROUTINE_STREAK_WARN:=3}
 
-typeset -g _MR_DRY_RUN=0 _MR_YES=0 _MR_JSON=0 _MR_NO_LOCK=0
+typeset -g _MR_DRY_RUN=0 _MR_YES=0 _MR_JSON=0 _MR_NO_LOCK=0 _MR_FORCE_CADENCE=0
 # JSON の出力先。--json では進捗を stderr へ逃がし、素の stdout を fd 5 に退避する。
 typeset -g _MR_JSON_FD=1
 typeset -g _MR_LOCK_DIR="" _MR_TMPDIR=""
@@ -85,7 +92,7 @@ typeset -g _MR_LOCK_DIR="" _MR_TMPDIR=""
 # ─────────────────────────────────────────────────────────────────
 
 _mr_usage() {
-  print -r -- "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json] [--timeout N] [--no-lock] [ls | <ステップ番号: 1,3,5>]"
+  print -r -- "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json] [--timeout N] [--no-lock] [--force-cadence] [ls | <ステップ番号: 1,3,5>]"
 }
 
 typeset -ga _mr_argv=()
@@ -95,6 +102,7 @@ while (( $# > 0 )); do
     -y|--yes)     _MR_YES=1; shift ;;
     --json)       _MR_JSON=1; shift ;;
     --no-lock)    _MR_NO_LOCK=1; shift ;;
+    --force-cadence) _MR_FORCE_CADENCE=1; shift ;;
     --timeout)
       if [[ -z ${2:-} || $2 != <-> ]]; then
         print -ru2 -- "ERROR: --timeout には秒数を指定してください"
@@ -244,6 +252,7 @@ run() {
 typeset -ga _mr_actions=() _mr_infos=()          # "num\tid\ttext"
 typeset -ga _mr_step_files=() _mr_step_names=() _mr_step_slugs=()
 typeset -ga _mr_step_critical=() _mr_step_abort=() _mr_step_destructive=()
+typeset -ga _mr_step_cadence=() _mr_step_weekday=()
 typeset -ga _mr_result_status=() _mr_result_rc=() _mr_result_ms=() _mr_result_note=()
 # 実際に実行して要対応の有無を評価できたステップの slug。
 # skip したステップの要対応は「今回出なかった」のではなく「見ていない」ので、
@@ -255,6 +264,101 @@ typeset -g _MR_FULL_RUN=0
 # ─────────────────────────────────────────────────────────────────
 # ステップの探索とメタデータ読み取り
 # ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────
+# 実行間隔 (cadence)
+# ─────────────────────────────────────────────────────────────────
+#
+# 週次・月次のステップは「毎日走らせて中で日付を見る」のではなく、本体が前回
+# 成功日を見て skip する。skip は「見ていない」側なので、要対応の解消判定と
+# 連続日数からも自動的に外れる（前提不足の skip と同じ扱い）。
+#
+# 前回成功日は $MYROUTINE_LOG_DIR/last-run/<slug> に YYYY-MM-DD で持つ。
+# 番号を指定した実行 (myroutine 5) は明示指定なので間隔判定をしない。
+
+typeset -gA _MR_WEEKDAYS=(mon 1 tue 2 wed 3 thu 4 fri 5 sat 6 sun 7)
+typeset -ga _MR_WEEKDAY_JA=(月 火 水 木 金 土 日)
+
+_mr_weekday_num() {
+  local v=${1:l}
+  if [[ -n ${_MR_WEEKDAYS[$v]:-} ]]; then
+    print -r -- "${_MR_WEEKDAYS[$v]}"
+    return 0
+  fi
+  if [[ $v == <1-7> ]]; then
+    print -r -- "$v"
+    return 0
+  fi
+  return 1
+}
+
+_mr_now_epoch() {
+  if [[ -n ${MYROUTINE_NOW_EPOCH:-} ]]; then
+    print -r -- "$MYROUTINE_NOW_EPOCH"
+  else
+    print -r -- "$EPOCHSECONDS"
+  fi
+}
+
+_mr_stamp_file() { print -r -- "$MYROUTINE_LOG_DIR/last-run/$1" }
+
+_mr_stamp_write() {
+  local slug=$1 dir="$MYROUTINE_LOG_DIR/last-run"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  local now=$(_mr_now_epoch)
+  strftime -s _mr_stamp_day %Y-%m-%d "$now" 2>/dev/null || return 0
+  print -r -- "$_mr_stamp_day" > "$(_mr_stamp_file "$slug")" 2>/dev/null
+  return 0
+}
+
+# 実行間隔を満たしているか。0 = 実行する / 1 = skip（理由を stdout に出す）
+_mr_cadence_due() {
+  local n=$1
+  local cadence=${_mr_step_cadence[$n]:-daily} weekday=${_mr_step_weekday[$n]:-}
+  (( _MR_FORCE_CADENCE )) && return 0
+  [[ $cadence == daily && -z $weekday ]] && return 0
+
+  local now=$(_mr_now_epoch) today_wd="" today_day="" today_month=""
+  strftime -s today_wd %u "$now"
+  strftime -s today_day %Y-%m-%d "$now"
+  strftime -s today_month %Y-%m "$now"
+
+  local stamp="" last=""
+  stamp=$(_mr_stamp_file "${_mr_step_slugs[$n]}")
+  [[ -f $stamp ]] && last=$(<"$stamp")
+  last=${last//[[:space:]]/}
+
+  # 曜日指定は間隔より先に見る。曜日が違う日は、間隔を満たしていても実行しない。
+  if [[ -n $weekday && $today_wd != $weekday ]]; then
+    print -r -- "${cadence}（${_MR_WEEKDAY_JA[$weekday]}曜のみ）"
+    return 1
+  fi
+
+  # 前回成功日が無い / 読めない形なら、初回として実行する
+  local last_epoch=""
+  if [[ -z $last ]] || ! strftime -r -s last_epoch %Y-%m-%d "$last" 2>/dev/null; then
+    return 0
+  fi
+
+  local today_epoch=""
+  strftime -r -s today_epoch %Y-%m-%d "$today_day"
+  local elapsed=$(( (today_epoch - last_epoch) / 86400 ))
+
+  case $cadence in
+    daily)
+      (( elapsed >= 1 )) && return 0 ;;
+    weekly)
+      (( elapsed >= 7 )) && return 0 ;;
+    biweekly)
+      (( elapsed >= 14 )) && return 0 ;;
+    monthly)
+      local last_month=""
+      strftime -s last_month %Y-%m "$last_epoch"
+      [[ $last_month != $today_month ]] && return 0 ;;
+  esac
+  print -r -- "${cadence}（前回 ${last}）"
+  return 1
+}
 
 _mr_slug_of() {
   local base=${1:t}
@@ -273,14 +377,21 @@ _mr_read_meta() {
     step_critical=false
     step_abort_on_fail=false
     step_destructive=false
+    step_cadence=""
+    step_cadence_weekday=""
     source "$file" || exit 10
     [[ -n $step_name ]] || exit 11
-    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}"$'\t'"${step_destructive}" >&4
+    case ${step_cadence:-daily} in
+      daily|weekly|biweekly|monthly) ;;
+      *) exit 12 ;;
+    esac
+    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}"$'\t'"${step_destructive}"$'\t'"${step_cadence:-daily}"$'\t'"${step_cadence_weekday}" >&4
   ) || rc=$?
   case $rc in
     0)  print -r -- "$out"; return 0 ;;
     10) print -ru2 -- "ERROR: ステップの読み込みに失敗しました: $file" ;;
     11) print -ru2 -- "ERROR: step_name が定義されていません: $file" ;;
+    12) print -ru2 -- "ERROR: step_cadence に使えるのは daily / weekly / biweekly / monthly だけです: $file" ;;
     *)  print -ru2 -- "ERROR: メタデータの取得に失敗しました (rc=$rc): $file" ;;
   esac
   return 1
@@ -306,6 +417,15 @@ _mr_discover() {
     _mr_step_critical+=("${parts[2]}")
     _mr_step_abort+=("${parts[3]}")
     _mr_step_destructive+=("${parts[4]}")
+    _mr_step_cadence+=("${parts[5]}")
+    local wd=""
+    if [[ -n ${parts[6]:-} ]]; then
+      wd=$(_mr_weekday_num "${parts[6]}") || {
+        print -ru2 -- "ERROR: step_cadence_weekday に使えるのは mon..sun / 1..7 だけです: ${parts[6]} (${f:t})"
+        return 1
+      }
+    fi
+    _mr_step_weekday+=("$wd")
     slug=$(_mr_slug_of "$f")
     # slug は action id の前置に使われ、履歴ではカンマ区切りで並ぶ。
     # 区切り文字が混ざると連続日数・NEW・解消の追跡が壊れる。
@@ -549,7 +669,11 @@ _mr_record() {
   # 失敗・タイムアウトしたステップは要対応の有無を確認しきれていない。
   # skip と同じく「見ていない」側に置かないと、判定前に落ちただけで
   # 前回の要対応が「解消」と誤表示され、連続日数も途切れる。
-  [[ $2 == ok ]] && _mr_evaluated+=("${_mr_step_slugs[$1]}")
+  if [[ $2 == ok ]]; then
+    _mr_evaluated+=("${_mr_step_slugs[$1]}")
+    # dry-run は実際には実行していないので、次回の間隔判定を進めてはいけない。
+    (( _MR_DRY_RUN )) || _mr_stamp_write "${_mr_step_slugs[$1]}"
+  fi
 }
 
 _mr_run_step() {
@@ -577,6 +701,19 @@ _mr_run_step() {
     _mr_record "$n" fail 1 0 "requires check failed"
     _mr_last_step_rc=1
     return 1
+  fi
+
+  # 実行間隔 → skip（番号指定の実行は明示指定なので判定しない）
+  if (( _MR_FULL_RUN )); then
+    local not_due=""
+    if not_due=$(_mr_cadence_due "$n"); then
+      :
+    else
+      print -r -- "  ${_MR_C_DIM}⊘ skip: 実行間隔を満たしていません（${not_due}）${_MR_C_RESET}"
+      _mr_record "$n" skip 0 0 "cadence: $not_due"
+      _mr_last_step_rc=0
+      return 0
+    fi
   fi
 
   # 破壊的ステップのゲート
@@ -947,6 +1084,11 @@ _mr_show_list() {
     [[ ${_mr_step_critical[$n]} == true ]] && mark+=" ${_MR_C_YELLOW}(critical)${_MR_C_RESET}"
     [[ ${_mr_step_destructive[$n]} == true ]] && mark+=" ${_MR_C_RED}(破壊的)${_MR_C_RESET}"
     [[ ${_mr_step_abort[$n]} == true ]] && mark+=" ${_MR_C_DIM}(失敗時に続行確認)${_MR_C_RESET}"
+    if [[ ${_mr_step_cadence[$n]} != daily || -n ${_mr_step_weekday[$n]} ]]; then
+      local cad="${_mr_step_cadence[$n]}"
+      [[ -n ${_mr_step_weekday[$n]} ]] && cad+="/${(k)_MR_WEEKDAYS[(r)${_mr_step_weekday[$n]}]}"
+      mark+=" ${_MR_C_CYAN}(${cad})${_MR_C_RESET}"
+    fi
     print -r -- "  ${_MR_C_CYAN}${n}.${_MR_C_RESET} ${_mr_step_names[$n]}${mark}"
     print -r -- "     ${_MR_C_DIM}${_mr_step_files[$n]:t}  slug=${_mr_step_slugs[$n]}${_MR_C_RESET}"
   done
