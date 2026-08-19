@@ -40,13 +40,14 @@ $MYROUTINE_LOG_DIR/
 
 ```
 main
- ├─ オプション解釈           --dry-run / --yes / --json / --timeout / --no-lock
+ ├─ オプション解釈           --dry-run / --yes / --json / --timeout / --no-lock / --force-cadence
  ├─ _mr_discover             steps.d を走査し、各ファイルのメタデータを読む
  │    └─ _mr_read_meta       サブシェルで source。stdout は捨て、fd 4 でメタだけ取る
  ├─ _mr_acquire_lock         mkdir で排他。stale なら pid 生存確認のうえ回収
  └─ _mr_run_sequence
       ├─ _mr_run_step  (各ステップ)
       │    ├─ _mr_check_requires    前提が欠けていれば skip（失敗ではない）
+      │    ├─ _mr_cadence_due       前回成功日から間隔が足りなければ skip（週次・月次）
       │    ├─ 破壊的ゲート           dry-run なら実行しない / --yes 無しなら confirm
       │    ├─ _mr_run_with_timeout
       │    │    ├─ _mr_exec_step &  サブシェルで source → step_run → step_verify
@@ -141,6 +142,9 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
   順序依存になり、本文中のリテラル `\n` が改行に化ける。`%` を先に退避する
   パーセント方式なら、`%25` が `%0A` / `%09` を部分文字列として含みえないので
   どちらの順で戻しても一意に復元できる
+- **実行間隔の判定を本体に置く** — 週次・月次を各ステップが自分で日付判定すると、
+  「今日は何もしない」が成功として記録され、要対応の解消判定と連続日数が汚れる。
+  本体が skip に落とすことで「見ていない」側へ自動的に入る
 - **「評価できた」の定義** — `ok` のみ。fail / timeout / skip は「見ていない」側に置く。
   ここを緩めると、判定前に落ちただけで前回の要対応が「解消」と誤表示される
 

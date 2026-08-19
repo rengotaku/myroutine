@@ -776,6 +776,113 @@ ran=$(grep -c ran "$MR_TD/ran.txt" 2>/dev/null || print -r -- 0)
 assert_eq "$ran" "1" "lock: 残留ロックの同時回収でも実行は 1 つだけ"
 
 # ─────────────────────────────────────────────────────────────────
+group "実行間隔 (step_cadence)"
+# ─────────────────────────────────────────────────────────────────
+
+# 2026-08-19 は火曜、2026-08-21 は金曜。テストは MYROUTINE_NOW_EPOCH で「今」を固定する。
+TUE=$(zsh -c 'zmodload zsh/datetime; strftime -r %Y-%m-%d 2026-08-19')
+FRI=$(zsh -c 'zmodload zsh/datetime; strftime -r %Y-%m-%d 2026-08-21')
+
+stamp() { mkdir -p "$MYROUTINE_LOG_DIR/last-run"; print -r -- "$2" > "$MYROUTINE_LOG_DIR/last-run/$1" }
+
+newenv
+mkstep 10-weekly.sh 'step_name="週次"
+step_cadence=weekly
+step_run() { print -r -- "週次が走った" }'
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr)
+assert_contains "$out" "週次が走った" "cadence: 前回実行が無ければ初回として実行する"
+assert_eq "$(<$MYROUTINE_LOG_DIR/last-run/weekly)" "2026-08-19" "cadence: 成功したら前回実行日を記録する"
+
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr)
+assert_contains "$out" "実行間隔を満たしていません" "cadence: 同日 2 回目は skip する"
+assert_not_contains "$out" "週次が走った" "cadence: skip したステップは実行されない"
+
+stamp weekly 2026-08-12
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr)
+assert_contains "$out" "週次が走った" "cadence: weekly は 7 日経過で実行する"
+
+stamp weekly 2026-08-14
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr)
+assert_not_contains "$out" "週次が走った" "cadence: weekly は 7 日未満なら skip する"
+
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr --force-cadence)
+assert_contains "$out" "週次が走った" "cadence: --force-cadence で間隔判定を無視する"
+
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr 1)
+assert_contains "$out" "週次が走った" "cadence: 番号を指定した実行は間隔判定をしない"
+
+newenv
+mkstep 10-dry.sh 'step_name="dry"
+step_cadence=weekly
+step_run() { print -r -- ok }'
+MYROUTINE_NOW_EPOCH=$TUE mr -n >/dev/null
+if [[ -f "$MYROUTINE_LOG_DIR/last-run/dry" ]]; then
+  fail "cadence: dry-run は前回実行日を進めない" "$(<$MYROUTINE_LOG_DIR/last-run/dry)"
+else
+  pass "cadence: dry-run は前回実行日を進めない"
+fi
+
+newenv
+mkstep 10-bi.sh 'step_name="隔週金曜"
+step_cadence=biweekly
+step_cadence_weekday=fri
+step_run() { print -r -- "隔週が走った" }'
+stamp bi 2026-08-07
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr)
+assert_contains "$out" "金曜のみ" "cadence: 曜日指定は間隔を満たしていても他の曜日を skip する"
+assert_not_contains "$out" "隔週が走った" "cadence: 曜日が違う日は実行されない"
+
+out=$(MYROUTINE_NOW_EPOCH=$FRI mr)
+assert_contains "$out" "隔週が走った" "cadence: 指定曜日かつ 14 日経過で実行する"
+
+stamp bi 2026-08-14
+out=$(MYROUTINE_NOW_EPOCH=$FRI mr)
+assert_not_contains "$out" "隔週が走った" "cadence: biweekly は 7 日後の同じ曜日では実行しない"
+
+newenv
+mkstep 10-monthly.sh 'step_name="月次"
+step_cadence=monthly
+step_run() { print -r -- "月次が走った" }'
+stamp monthly 2026-08-01
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr)
+assert_not_contains "$out" "月次が走った" "cadence: monthly は同じ月なら skip する"
+stamp monthly 2026-07-31
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr)
+assert_contains "$out" "月次が走った" "cadence: monthly は月が変わったら実行する"
+
+newenv
+mkstep 10-bad.sh 'step_name="不正"
+step_cadence=fortnightly
+step_run() { : }'
+out=$(mr)
+assert_contains "$out" "step_cadence に使えるのは" "cadence: 不正な値をエラーにする"
+
+newenv
+mkstep 10-badwd.sh 'step_name="不正曜日"
+step_cadence=weekly
+step_cadence_weekday=funday
+step_run() { : }'
+out=$(mr)
+assert_contains "$out" "step_cadence_weekday に使えるのは" "cadence: 不正な曜日をエラーにする"
+
+newenv
+mkstep 10-mark.sh 'step_name="表示"
+step_cadence=biweekly
+step_cadence_weekday=fri
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "(biweekly/fri)" "cadence: ls に間隔と曜日が出る"
+
+# skip されたステップの要対応は「見ていない」ので解消扱いにしない
+newenv
+mkstep 10-act.sh 'step_name="要対応を出す"
+step_cadence=weekly
+step_run() { add_action pending "残っている" }'
+MYROUTINE_NOW_EPOCH=$TUE mr >/dev/null
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr)
+assert_not_contains "$out" "解消" "cadence: skip した回で前回の要対応が解消扱いにならない"
+
+# ─────────────────────────────────────────────────────────────────
 group "JSON のエスケープ"
 # ─────────────────────────────────────────────────────────────────
 

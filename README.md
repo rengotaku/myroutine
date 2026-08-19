@@ -100,6 +100,8 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 | `step_requires` | `()` | 無いコマンドがあれば失敗ではなく skip |
 | `step_requires_path` | `()` | 無いパスがあれば失敗ではなく skip |
 | `step_timeout` | `600` | 秒。`0` で無制限 |
+| `step_cadence` | `daily` | `daily` / `weekly` / `biweekly` / `monthly`。前回成功日からの間隔が足りなければ失敗ではなく skip |
+| `step_cadence_weekday` | （なし） | `mon`..`sun` / `1`..`7`。指定すると「間隔を満たし、かつその曜日」のときだけ実行する |
 
 ### 関数
 
@@ -141,6 +143,11 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 - **多重起動ロック** — 2 つ目の実行は中止します。`flock` は macOS に無いので `mkdir` の
   アトミック性で排他し、残留ロックは pid の生存確認で回収します
 - **`step_timeout`** — ハングしたステップを打ち切り、子孫プロセスごと落とします
+- **`step_cadence`** — 週次・月次のステップを「毎日走らせて中で日付を見る」形にしません。
+  本体が前回成功日（`$MYROUTINE_LOG_DIR/last-run/<slug>`）を見て skip します。skip は
+  「見ていない」側なので、要対応の解消判定と連続日数からも自動的に外れます。
+  番号を指定した実行（`myroutine 5`）は明示指定なので間隔判定をせず、
+  `--force-cadence` で全ステップの間隔判定を無視できます
 
 ## 可視化のしくみ
 
