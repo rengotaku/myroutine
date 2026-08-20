@@ -776,6 +776,33 @@ ran=$(grep -c ran "$MR_TD/ran.txt" 2>/dev/null || print -r -- 0)
 assert_eq "$ran" "1" "lock: 残留ロックの同時回収でも実行は 1 つだけ"
 
 # ─────────────────────────────────────────────────────────────────
+group "履歴の所要時間 (5 列目)"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-fast.sh 'step_name="速い"
+step_run() { : }'
+mkstep 20-slow.sh 'step_name="遅い"
+step_requires=(this-command-does-not-exist)
+step_run() { : }'
+mr >/dev/null 2>&1
+hline=$(tail -1 "$MYROUTINE_LOG_DIR/history.tsv")
+if [[ $hline == *"	fast="[0-9]* ]]; then pass "履歴: 5 列目に slug=ms を記録する"
+else fail "履歴: 5 列目に slug=ms を記録する" "$hline"; fi
+if [[ $hline != *slow=* ]]; then pass "履歴: 実行に入らなかったステップは載せない"
+else fail "履歴: 実行に入らなかったステップは載せない" "$hline"; fi
+
+# 5 列目が無い旧形式の履歴を読んでも劣化検知が動くこと
+newenv
+mkstep 10-stale.sh 'step_name="滞留"
+step_run() { add_action stuck "ずっと残っている" }'
+{
+  print -r -- "2026-08-09"$'\t'"09:00:00"$'\t'"stale.stuck"$'\t'"stale"
+} > "$MYROUTINE_LOG_DIR/history.tsv"
+out=$(mr)
+assert_contains "$out" "(2 日連続)" "履歴: 5 列目が無い旧形式も読める"
+
+# ─────────────────────────────────────────────────────────────────
 group "実行間隔 (step_cadence)"
 # ─────────────────────────────────────────────────────────────────
 

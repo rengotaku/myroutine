@@ -810,7 +810,11 @@ _mr_run_sequence() {
 # ─────────────────────────────────────────────────────────────────
 #
 # 履歴は「実行日 <TAB> 時刻 <TAB> action id のカンマ区切り <TAB> 評価できた slug の
-# カンマ区切り」の TSV で追記する。
+# カンマ区切り <TAB> slug=所要ミリ秒 のカンマ区切り」の TSV で追記する。
+#
+# 5 列目が要る理由: ステップ別の所要時間はサマリの合計と --json にしか出ず、
+# 「どのステップが長いか」を後から集計できなかった。列を足すだけなので、
+# 5 列目を読まない既存の読み手（_mr_history_days）はそのまま動く。
 #
 # 4 列目が要る理由: skip されたステップの要対応は「今回出なかった」のではなく
 # 「見ていない」。区別しないと、前提コマンドが一時的に無いだけで前回の要対応が
@@ -917,11 +921,24 @@ _mr_analyze_history() {
   fi
 }
 
+# ステップ別の所要時間を "slug=ms,slug=ms" にする。
+# 実行に入らなかったステップ（skip・前提不足・間隔外）は 0ms が入るだけなので載せない。
+_mr_duration_field() {
+  local -a out=()
+  local n=0
+  for (( n = 1; n <= ${#_mr_step_files}; n++ )); do
+    [[ -n ${_mr_result_ms[$n]:-} ]] || continue
+    [[ ${_mr_result_status[$n]:-} == skip ]] && continue
+    out+=("${_mr_step_slugs[$n]}=${_mr_result_ms[$n]}")
+  done
+  print -r -- "${(j:,:)out}"
+}
+
 _mr_append_history() {
   local hf=$(_mr_history_file)
   local -a cur=(${(f)"$(_mr_current_ids)"})
   local -aU ev=(${_mr_evaluated})
-  print -r -- "$(date +%Y-%m-%d)"$'\t'"$(date +%H:%M:%S)"$'\t'"${(j:,:)cur}"$'\t'"${(j:,:)ev}" >> "$hf"
+  print -r -- "$(date +%Y-%m-%d)"$'\t'"$(date +%H:%M:%S)"$'\t'"${(j:,:)cur}"$'\t'"${(j:,:)ev}"$'\t'"$(_mr_duration_field)" >> "$hf"
 }
 
 # ─────────────────────────────────────────────────────────────────

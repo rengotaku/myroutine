@@ -82,8 +82,8 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
 ### `history.tsv`
 
 ```
-2026-08-11<TAB>09:12:03<TAB>brew.unclassified,cleanup.pending<TAB>network,brew,cleanup
-2026-08-12<TAB>09:08:41<TAB>brew.unclassified<TAB>network,brew
+2026-08-11<TAB>09:12:03<TAB>brew.unclassified,cleanup.pending<TAB>network,brew,cleanup<TAB>network=812,brew=664231,cleanup=1203
+2026-08-12<TAB>09:08:41<TAB>brew.unclassified<TAB>network,brew<TAB>network=790,brew=531004
 ```
 
 4 列目は **その実行で成功したステップの slug**。skip されたステップも、失敗・
@@ -91,6 +91,11 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
 のではなく「見ていない」。これが無いと、一時的な skip や失敗だけで前回の要対応が
 「解消」になり連続日数も失われる。4 列目が空 or `*` の行は旧形式として
 「全ステップを評価した」とみなす。
+
+5 列目は **ステップ別の所要ミリ秒**（`slug=ms` のカンマ区切り）。サマリには合計しか
+出ず、ステップ別は `--json` の一過性の出力にしか無かったため、「どのステップが長いか」を
+後から集計できるようにここへ残す。実行に入らなかったステップ（skip・前提不足）は載せない。
+列を足すだけなので、5 列目が無い旧形式の行もそのまま読める。
 
 実行日単位に畳んで新しい順に見て、当該 id が連続して現れる回数が「N 日連続」になる。
 実行しなかった日は連続を切らない（毎日実行するとは限らないため、実行日ベースで数える）。
