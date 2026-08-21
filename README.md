@@ -97,6 +97,7 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 | `step_critical` | `false` | 失敗しても後続は続行するが、要対応に critical として記録する |
 | `step_abort_on_fail` | `false` | 失敗したら続行可否を尋ねる |
 | `step_destructive` | `false` | dry-run では実行せず、`--yes` が無ければ確認を強制する |
+| `step_parallel` | `false` | 実行順で連続する parallel ステップを 1 グループとして同時に実行する。`step_destructive` / `step_abort_on_fail` とは併用できない |
 | `step_requires` | `()` | 無いコマンドがあれば失敗ではなく skip |
 | `step_requires_path` | `()` | 無いパスがあれば失敗ではなく skip |
 | `step_timeout` | `600` | 秒。`0` で無制限 |
@@ -135,7 +136,7 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 - **`step_verify`** — 終了コードが嘘をつくコマンドがあります。状態を再取得した判定を
   終了コードより優先します
 - **`confirm`** — tty が取れない環境（パイプ実行・CI・スケジューラ経由）では必ず中止側へ
-  倒します
+  倒します。並列グループの中も同じ扱いです（誰の問いか分からない答えを受け取りうるため）
 - **`run` + `--dry-run`** — 副作用を本体経由に強制するので、dry-run が「ステップの礼儀」
   ではなく構造で担保されます
 - **`step_destructive`** — 破壊的操作を本体から見えるようにし、dry-run での実行禁止と
@@ -172,6 +173,7 @@ skip・失敗・タイムアウトしたステップの要対応は「今回出�
 | `MYROUTINE_LOG_DIR` | `${XDG_STATE_HOME:-~/.local/state}/myroutine` |
 | `MYROUTINE_TIMEOUT` | `600` |
 | `MYROUTINE_STREAK_WARN` | `3` |
+| `MYROUTINE_PARALLEL_MAX` | `4` |
 | `NO_COLOR` | 設定すると ANSI カラーを無効化 |
 
 ログは `$MYROUTINE_LOG_DIR/YYYY-MM-DD.txt` に**追記**されます（端末には色付き、

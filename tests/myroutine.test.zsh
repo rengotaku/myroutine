@@ -9,6 +9,7 @@
 #
 
 emulate -R zsh
+zmodload zsh/datetime
 setopt pipefail
 
 typeset -g MR=${0:A:h}/../bin/myroutine
@@ -922,6 +923,237 @@ if print -r -- "$json" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/d
 else
   fail "JSON: 制御文字を含む本文でも妥当な JSON" "$json"
 fi
+
+
+# ─────────────────────────────────────────────────────────────────
+group "並列実行 (step_parallel)"
+# ─────────────────────────────────────────────────────────────────
+
+# 実測で並列性を確認する。逐次なら 2 秒以上かかる組を 1.8 秒未満で終える。
+newenv
+mkstep 10-p1.sh 'step_name="並列1"
+step_parallel=true
+step_run() { sleep 1; ok done1 }'
+mkstep 20-p2.sh 'step_name="並列2"
+step_parallel=true
+step_run() { sleep 1; ok done2 }'
+t0=$EPOCHREALTIME
+out=$(mr)
+elapsed=$(( EPOCHREALTIME - t0 ))
+if (( elapsed < 1.8 )); then
+  pass "parallel: 連続する parallel ステップが同時に走る (${elapsed}s)"
+else
+  fail "parallel: 連続する parallel ステップが同時に走る" "${elapsed}s かかった（逐次のまま）"
+fi
+assert_contains "$out" "done1" "parallel: 片方の出力が回収される"
+assert_contains "$out" "done2" "parallel: もう片方の出力も回収される"
+
+# 出力は完了順ではなくステップ番号順。遅い方を先番号に置いて確かめる。
+newenv
+mkstep 10-slow.sh 'step_name="遅い方"
+step_parallel=true
+step_run() { sleep 0.6; ok AAAMARK }'
+mkstep 20-fast.sh 'step_name="速い方"
+step_parallel=true
+step_run() { ok BBBMARK }'
+out=$(mr)
+if (( ${#${out%%AAAMARK*}} < ${#${out%%BBBMARK*}} )); then
+  pass "parallel: 出力は完了順ではなくステップ番号順"
+else
+  fail "parallel: 出力は完了順ではなくステップ番号順" "$out"
+fi
+
+# 要対応・情報は両方のステップから集約される
+newenv
+mkstep 10-pa.sh 'step_name="要対応A"
+step_parallel=true
+step_run() { add_action left "左の要対応" }'
+mkstep 20-pb.sh 'step_name="要対応B"
+step_parallel=true
+step_run() { add_action right "右の要対応"; add_info note "情報" }'
+out=$(mr)
+assert_contains "$out" "左の要対応" "parallel: 要対応が両方集約される (1)"
+assert_contains "$out" "右の要対応" "parallel: 要対応が両方集約される (2)"
+assert_contains "$out" "情報" "parallel: 情報も集約される"
+
+# グループは逐次ステップを跨がない
+newenv
+mkstep 10-g1.sh 'step_name="P前半"
+step_parallel=true
+step_run() { ok first }'
+mkstep 20-mid.sh 'step_name="逐次"
+step_run() { ok middle }'
+mkstep 30-g2.sh 'step_name="P後半"
+step_parallel=true
+step_run() { ok last }'
+out=$(mr)
+if (( ${#${out%%first*}} < ${#${out%%middle*}} && ${#${out%%middle*}} < ${#${out%%last*}} )); then
+  pass "parallel: グループは逐次ステップを跨がない"
+else
+  fail "parallel: グループは逐次ステップを跨がない" "$out"
+fi
+
+# 失敗・critical の扱いは逐次と同じ
+newenv
+mkstep 10-pf.sh 'step_name="並列で失敗"
+step_parallel=true
+step_critical=true
+step_run() { err "わざと失敗"; return 7 }'
+mkstep 20-pok.sh 'step_name="並列で成功"
+step_parallel=true
+step_run() { ok fine }'
+out=$(mr)
+assert_contains "$out" "rc=7" "parallel: 失敗の rc が記録される"
+assert_contains "$out" "critical" "parallel: critical の失敗が要対応に載る"
+assert_contains "$out" "fine" "parallel: 片方が失敗しても他方は完走する"
+assert_eq "$(mr_rc)" "1" "parallel: critical の失敗で終了コードが 1"
+
+# タイムアウトはステップ単位で効く
+newenv
+mkstep 10-pto.sh 'step_name="並列でタイムアウト"
+step_parallel=true
+step_timeout=1
+step_run() { sleep 30 }'
+mkstep 20-pquick.sh 'step_name="並列で即完了"
+step_parallel=true
+step_run() { ok quick }'
+out=$(mr)
+assert_contains "$out" "タイムアウト" "parallel: タイムアウトがステップ単位で効く"
+assert_contains "$out" "quick" "parallel: 他方はタイムアウトに巻き込まれない"
+
+# step_verify は並列でも step_run より優先される
+newenv
+mkstep 10-pv.sh 'step_name="並列で検証失敗"
+step_parallel=true
+step_run() { return 0 }
+step_verify() { return 5 }'
+mkstep 20-pv2.sh 'step_name="並列の相方"
+step_parallel=true
+step_run() { ok mate }'
+out=$(mr)
+assert_contains "$out" "step_verify が失敗" "parallel: step_verify が優先される"
+
+# 前提不足の skip はグループ内でも効き、他方の実行を止めない
+newenv
+mkstep 10-pskip.sh 'step_name="前提なし"
+step_parallel=true
+step_requires=(mr-no-such-command-xyz)
+step_run() { ok never }'
+mkstep 20-prun.sh 'step_name="走る方"
+step_parallel=true
+step_run() { ok ran }'
+out=$(mr)
+assert_contains "$out" "前提が足りません" "parallel: 前提不足の skip がグループ内で効く"
+assert_not_contains "$out" "never" "parallel: skip したステップは実行されない"
+assert_contains "$out" "ran" "parallel: skip は他方の実行を止めない"
+
+# 確認を求めるステップは中止側に倒れる（プロンプトの混線を避ける）
+newenv
+mkstep 10-pc.sh 'step_name="確認を求める"
+step_parallel=true
+step_run() { if confirm "やる?"; then ok yes; else ok no; fi }'
+mkstep 20-pc2.sh 'step_name="相方"
+step_parallel=true
+step_run() { ok mate }'
+out=$(mr -y)
+assert_contains "$out" "並列実行中は確認を求められません" "parallel: confirm は中止側に倒れる"
+assert_contains "$out" "no" "parallel: confirm は --yes でも承認しない"
+
+# 宣言の矛盾は discover の時点で落とす
+newenv
+mkstep 10-pd.sh 'step_name="破壊的かつ並列"
+step_parallel=true
+step_destructive=true
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "step_parallel と step_destructive は併用できません" "parallel: destructive との併用をエラーにする"
+assert_eq "$(mr_rc ls)" "1" "parallel: destructive との併用で終了コードが 1"
+
+newenv
+mkstep 10-pab.sh 'step_name="中断確認かつ並列"
+step_parallel=true
+step_abort_on_fail=true
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "step_parallel と step_abort_on_fail は併用できません" "parallel: abort_on_fail との併用をエラーにする"
+
+# 一覧に印が出る
+newenv
+mkstep 10-pl.sh 'step_name="並列ステップ"
+step_parallel=true
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "(parallel)" "parallel: ls に印が出る"
+
+# 同時実行数 1 でも結果は変わらない（逐次との等価性）
+newenv
+mkstep 10-pm1.sh 'step_name="上限1のA"
+step_parallel=true
+step_run() { add_action a "A の要対応" }'
+mkstep 20-pm2.sh 'step_name="上限1のB"
+step_parallel=true
+step_run() { add_action b "B の要対応" }'
+out=$(MYROUTINE_PARALLEL_MAX=1 mr)
+assert_contains "$out" "A の要対応" "parallel: MYROUTINE_PARALLEL_MAX=1 でも全ステップを実行する (1)"
+assert_contains "$out" "B の要対応" "parallel: MYROUTINE_PARALLEL_MAX=1 でも全ステップを実行する (2)"
+
+# 番号指定の実行でも並列にまとまる
+newenv
+mkstep 10-ps1.sh 'step_name="指定1"
+step_parallel=true
+step_run() { sleep 1; ok s1 }'
+mkstep 20-ps2.sh 'step_name="指定2"
+step_parallel=true
+step_run() { sleep 1; ok s2 }'
+mkstep 30-ps3.sh 'step_name="指定3"
+step_run() { ok s3 }'
+t0=$EPOCHREALTIME
+out=$(mr 1,2)
+elapsed=$(( EPOCHREALTIME - t0 ))
+if (( elapsed < 1.8 )); then
+  pass "parallel: 番号指定の実行でも並列にまとまる (${elapsed}s)"
+else
+  fail "parallel: 番号指定の実行でも並列にまとまる" "${elapsed}s かかった"
+fi
+assert_not_contains "$out" "s3" "parallel: 番号指定の範囲外は実行しない"
+
+# dry-run は並列でも副作用を出さない
+newenv
+mkstep 10-pdr.sh 'step_name="dry-run A"
+step_parallel=true
+step_run() { run touch "$MR_TD/side-a" }'
+mkstep 20-pdr2.sh 'step_name="dry-run B"
+step_parallel=true
+step_run() { run touch "$MR_TD/side-b" }'
+out=$(mr -n)
+if [[ ! -e "$MR_TD/side-a" && ! -e "$MR_TD/side-b" ]]; then
+  pass "parallel: dry-run では副作用が出ない"
+else
+  fail "parallel: dry-run では副作用が出ない" "ファイルが作られた"
+fi
+
+
+# 所要時間の表示は実時間。並列でステップ別の合計を超えることを漏らさない。
+newenv
+mkstep 10-w1.sh 'step_name="実時間1"
+step_parallel=true
+step_run() { sleep 1.2 }'
+mkstep 20-w2.sh 'step_name="実時間2"
+step_parallel=true
+step_run() { sleep 1.2 }'
+out=$(mr)
+assert_contains "$out" "ステップ合計" "parallel: 所要は実時間で出し、ステップ合計を添える"
+if [[ $out == *"所要 1s（ステップ合計 "* ]]; then
+  pass "parallel: 実時間 < ステップ合計 になる"
+else
+  fail "parallel: 実時間 < ステップ合計 になる" "$(print -r -- "$out" | grep 所要)"
+fi
+
+newenv
+mkstep 10-seqw.sh 'step_name="逐次の実時間"
+step_run() { : }'
+out=$(mr)
+assert_not_contains "$out" "ステップ合計" "逐次では内訳を添えない"
 
 # ─────────────────────────────────────────────────────────────────
 print -r -- ""
