@@ -31,6 +31,10 @@
 #   step_abort_on_fail=true        # 任意 (既定 false)。失敗したら続行可否を尋ねる
 #   step_destructive=true          # 任意 (既定 false)。dry-run では実行せず、
 #                                  #   --yes が無ければ確認を強制する
+#   step_parallel=true             # 任意 (既定 false)。実行順で連続する parallel
+#                                  #   ステップを 1 グループとして同時に実行する。
+#                                  #   step_destructive / step_abort_on_fail とは
+#                                  #   併用できない（確認と中断が成立しないため）
 #   step_requires=(brew git)       # 任意。無いコマンドがあれば失敗ではなく skip
 #   step_requires_path=(~/foo)     # 任意。無いパスがあれば失敗ではなく skip
 #   step_timeout=300               # 任意。0 で無制限。既定は --timeout / 600 秒
@@ -70,6 +74,7 @@
 #   MYROUTINE_LOG_DIR     状態・ログ置き場 既定 ${XDG_STATE_HOME:-~/.local/state}/myroutine
 #   MYROUTINE_TIMEOUT     既定タイムアウト秒 (既定 600、0 で無制限)
 #   MYROUTINE_STREAK_WARN 何日連続で滞留したら強調するか (既定 3)
+#   MYROUTINE_PARALLEL_MAX 並列グループの同時実行数 (既定 4、1 で逐次と同じ)
 #   MYROUTINE_NOW_EPOCH   「今」を固定する epoch 秒 (テスト用。既定は現在時刻)
 #   NO_COLOR              設定すると ANSI カラーを無効化する
 #
@@ -81,11 +86,14 @@ setopt pipefail
 : ${MYROUTINE_LOG_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/myroutine}
 : ${MYROUTINE_TIMEOUT:=600}
 : ${MYROUTINE_STREAK_WARN:=3}
+: ${MYROUTINE_PARALLEL_MAX:=4}
 
 typeset -g _MR_DRY_RUN=0 _MR_YES=0 _MR_JSON=0 _MR_NO_LOCK=0 _MR_FORCE_CADENCE=0
 # JSON の出力先。--json では進捗を stderr へ逃がし、素の stdout を fd 5 に退避する。
 typeset -g _MR_JSON_FD=1
 typeset -g _MR_LOCK_DIR="" _MR_TMPDIR=""
+# 実行全体の開始時刻。並列があるとステップ別の合計は実時間と一致しない。
+typeset -g _MR_RUN_T0=0
 
 # ─────────────────────────────────────────────────────────────────
 # オプション解釈
@@ -216,8 +224,17 @@ capture() {
 
 # 確認プロンプト。tty が取れない環境 (パイプ実行・CI・スケジューラ経由) では
 # 必ず中止側に倒す。dry-run では尋ねず、実行しない側の答えを返す。
+# 並列グループの中では複数ステップが同時に stdin を読みうる。プロンプトが混線して
+# 「どのステップの確認か」が分からない答えを受け取るより、tty が取れない環境と同じく
+# 中止側へ倒す。ステップが確認を求めたこと自体は見えるように警告として残す。
+typeset -g _MR_IN_PARALLEL=0
+
 confirm() {
   local msg=${1:-"続行しますか?"}
+  if (( _MR_IN_PARALLEL )); then
+    warn "並列実行中は確認を求められません（中止側に倒します）: ${msg}"
+    return 1
+  fi
   if (( _MR_DRY_RUN )); then
     print -r -- "  ${_MR_C_DIM}[dry-run] 確認を求める: ${msg}${_MR_C_RESET}"
     return 1
@@ -252,6 +269,7 @@ run() {
 typeset -ga _mr_actions=() _mr_infos=()          # "num\tid\ttext"
 typeset -ga _mr_step_files=() _mr_step_names=() _mr_step_slugs=()
 typeset -ga _mr_step_critical=() _mr_step_abort=() _mr_step_destructive=()
+typeset -ga _mr_step_parallel=()
 typeset -ga _mr_step_cadence=() _mr_step_weekday=()
 typeset -ga _mr_result_status=() _mr_result_rc=() _mr_result_ms=() _mr_result_note=()
 # 実際に実行して要対応の有無を評価できたステップの slug。
@@ -379,19 +397,29 @@ _mr_read_meta() {
     step_destructive=false
     step_cadence=""
     step_cadence_weekday=""
+    step_parallel=false
     source "$file" || exit 10
     [[ -n $step_name ]] || exit 11
     case ${step_cadence:-daily} in
       daily|weekly|biweekly|monthly) ;;
       *) exit 12 ;;
     esac
-    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}"$'\t'"${step_destructive}"$'\t'"${step_cadence:-daily}"$'\t'"${step_cadence_weekday}" >&4
+    # 併用を実行時に弾くと「走らせてみるまで分からない」。宣言の時点で落とす。
+    if [[ $step_parallel == true ]]; then
+      [[ $step_destructive == true ]] && exit 13
+      [[ $step_abort_on_fail == true ]] && exit 14
+    fi
+    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}"$'\t'"${step_destructive}"$'\t'"${step_cadence:-daily}"$'\t'"${step_cadence_weekday}"$'\t'"${step_parallel}" >&4
   ) || rc=$?
   case $rc in
     0)  print -r -- "$out"; return 0 ;;
     10) print -ru2 -- "ERROR: ステップの読み込みに失敗しました: $file" ;;
     11) print -ru2 -- "ERROR: step_name が定義されていません: $file" ;;
     12) print -ru2 -- "ERROR: step_cadence に使えるのは daily / weekly / biweekly / monthly だけです: $file" ;;
+    13) print -ru2 -- "ERROR: step_parallel と step_destructive は併用できません: $file"
+        print -ru2 -- "       破壊的ステップの確認は stdin を読むため、並列では混線します" ;;
+    14) print -ru2 -- "ERROR: step_parallel と step_abort_on_fail は併用できません: $file"
+        print -ru2 -- "       後続が既に走っている状況では「続行するか」を尋ねる意味がありません" ;;
     *)  print -ru2 -- "ERROR: メタデータの取得に失敗しました (rc=$rc): $file" ;;
   esac
   return 1
@@ -426,6 +454,7 @@ _mr_discover() {
       }
     fi
     _mr_step_weekday+=("$wd")
+    _mr_step_parallel+=("${parts[7]:-false}")
     slug=$(_mr_slug_of "$f")
     # slug は action id の前置に使われ、履歴ではカンマ区切りで並ぶ。
     # 区切り文字が混ざると連続日数・NEW・解消の追跡が壊れる。
@@ -676,17 +705,12 @@ _mr_record() {
   fi
 }
 
-_mr_run_step() {
+# 実行前のふるい。前提・実行間隔・破壊的ステップのゲートを 1 か所に集める。
+# 逐次と並列で判定を二重に書かないための分離で、記録は必ずここで済ませる。
+# 戻り値 0 = 実行してよい / 1 = skip として記録した / 2 = エラーとして記録した
+_mr_step_gate() {
   local n=$1
-  local total=${#_mr_step_files}
-  if (( n < 1 || n > total )); then
-    print -ru2 -- "ERROR: ステップ $n は存在しません（1〜${total}）"
-    _mr_last_step_rc=1
-    return 1
-  fi
-
-  local name=${_mr_step_names[$n]} file=${_mr_step_files[$n]} slug=${_mr_step_slugs[$n]}
-  _mr_hdr "$n" "$total" "$name"
+  local name=${_mr_step_names[$n]} file=${_mr_step_files[$n]}
 
   # 前提条件 → skip
   local missing=""
@@ -694,54 +718,47 @@ _mr_run_step() {
     if [[ -n $missing ]]; then
       print -r -- "  ${_MR_C_DIM}⊘ skip: 前提が足りません（${missing}）${_MR_C_RESET}"
       _mr_record "$n" skip 0 0 "$missing"
-      _mr_last_step_rc=0
-      return 0
+      return 1
     fi
     err "前提条件の確認に失敗しました"
     _mr_record "$n" fail 1 0 "requires check failed"
-    _mr_last_step_rc=1
-    return 1
+    return 2
   fi
 
   # 実行間隔 → skip（番号指定の実行は明示指定なので判定しない）
   if (( _MR_FULL_RUN )); then
     local not_due=""
-    if not_due=$(_mr_cadence_due "$n"); then
-      :
-    else
+    if ! not_due=$(_mr_cadence_due "$n"); then
       print -r -- "  ${_MR_C_DIM}⊘ skip: 実行間隔を満たしていません（${not_due}）${_MR_C_RESET}"
       _mr_record "$n" skip 0 0 "cadence: $not_due"
-      _mr_last_step_rc=0
-      return 0
+      return 1
     fi
   fi
 
-  # 破壊的ステップのゲート
+  # 破壊的ステップのゲート（step_parallel との併用は discover で弾いてある）
   if [[ ${_mr_step_destructive[$n]} == true ]]; then
     if (( _MR_DRY_RUN )); then
       print -r -- "  ${_MR_C_DIM}[dry-run] 破壊的ステップのため実行しません${_MR_C_RESET}"
       _mr_record "$n" skip 0 0 "dry-run (destructive)"
-      _mr_last_step_rc=0
-      return 0
+      return 1
     fi
     # ステップ側が confirm を呼び忘れても本体が埋める
     if ! confirm "「${name}」は破壊的な操作を含みます。実行しますか?"; then
       print -r -- "  ${_MR_C_DIM}⊘ skip: 実行を見送りました${_MR_C_RESET}"
       _mr_record "$n" skip 0 0 "declined (destructive)"
-      _mr_last_step_rc=0
-      return 0
+      return 1
     fi
   fi
+  return 0
+}
 
-  local chan="$_MR_TMPDIR/chan"
-  : > "$chan"
-  local limit=$(_mr_step_timeout_of "$file")
-  local t0=$(_mr_now_ms)
-  local rc=0
-  _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" || rc=$?
-  local ms=$(( $(_mr_now_ms) - t0 ))
+# 実行結果を分類して記録する。逐次・並列に共通の唯一の出口。
+# 戻り値 1 は critical の失敗（呼び出し側が全体の失敗として拾う）。
+_mr_step_finalize() {
+  local n=$1 rc=$2 ms=$3 timed_out=$4 limit=$5
+  local name=${_mr_step_names[$n]} slug=${_mr_step_slugs[$n]}
+  local chan="$_MR_TMPDIR/chan.$n"
   _mr_drain "$chan"
-  _mr_last_step_rc=$rc
 
   if (( rc == 0 )); then
     _mr_record "$n" ok 0 "$ms" ""
@@ -749,7 +766,7 @@ _mr_run_step() {
   fi
 
   # 終了コードの値で内部事情を判別しない（ステップが同じ値を返しうる）
-  if (( _mr_timed_out )); then
+  if (( timed_out )); then
     err "${name} がタイムアウトしました (${limit}s)"
     _mr_record "$n" timeout "$rc" "$ms" "${limit}s"
   elif [[ -e "${chan}.srcfail" ]]; then
@@ -771,6 +788,111 @@ _mr_run_step() {
   return 0
 }
 
+_mr_run_step() {
+  local n=$1
+  local total=${#_mr_step_files}
+  if (( n < 1 || n > total )); then
+    print -ru2 -- "ERROR: ステップ $n は存在しません（1〜${total}）"
+    _mr_last_step_rc=1
+    return 1
+  fi
+
+  local name=${_mr_step_names[$n]} file=${_mr_step_files[$n]} slug=${_mr_step_slugs[$n]}
+  _mr_hdr "$n" "$total" "$name"
+
+  local g=0
+  _mr_step_gate "$n" || g=$?
+  if (( g == 2 )); then
+    _mr_last_step_rc=1
+    return 1
+  elif (( g == 1 )); then
+    _mr_last_step_rc=0
+    return 0
+  fi
+
+  local chan="$_MR_TMPDIR/chan.$n"
+  : > "$chan"
+  local limit=$(_mr_step_timeout_of "$file")
+  local t0=$(_mr_now_ms)
+  local rc=0
+  _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" || rc=$?
+  local ms=$(( $(_mr_now_ms) - t0 ))
+  _mr_last_step_rc=$rc
+
+  local frc=0
+  _mr_step_finalize "$n" "$rc" "$ms" "$_mr_timed_out" "$limit" || frc=$?
+  return $frc
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 並列グループ
+# ─────────────────────────────────────────────────────────────────
+#
+# step_parallel=true のステップは、実行順で連続する範囲を 1 グループとして同時に
+# 実行する。グループは逐次ステップを跨がない。並び順はファイル名で決まるので、
+# どこで区切るかは番号付けだけで制御できる。
+#
+# 親の配列（結果・要対応・評価済み slug）はサブシェルから変更できないため、
+# 背景に出すのは「実行」だけに限る。ゲートと記録は親で行い、出力はステップ単位に
+# 溜めてから番号順に流す。これで端末・日次ログ・サマリの見え方は逐次と変わらない。
+
+# 背景で 1 ステップを走らせ、結果をファイルで返す
+_mr_exec_parallel() {
+  local n=$1
+  local file=${_mr_step_files[$n]} slug=${_mr_step_slugs[$n]}
+  local chan="$_MR_TMPDIR/chan.$n"
+  local limit=$(_mr_step_timeout_of "$file")
+  local t0=$(_mr_now_ms) rc=0
+  _MR_IN_PARALLEL=1
+  _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" || rc=$?
+  print -r -- "$rc"$'\t'"$(( $(_mr_now_ms) - t0 ))"$'\t'"${_mr_timed_out}"$'\t'"$limit" \
+    > "$_MR_TMPDIR/res.$n"
+}
+
+_mr_run_parallel_group() {
+  local -a group=("$@")
+  local total=${#_mr_step_files} n="" m="" overall=0 g=0
+  local -a due=()
+
+  for n in $group; do
+    : > "$_MR_TMPDIR/out.$n"
+    : > "$_MR_TMPDIR/chan.$n"
+    rm -f "$_MR_TMPDIR/res.$n" "$_MR_TMPDIR/chan.$n.srcfail" "$_MR_TMPDIR/chan.$n.nofunc"
+    g=0
+    { _mr_step_gate "$n" } >> "$_MR_TMPDIR/out.$n" 2>&1 || g=$?
+    (( g == 2 )) && overall=1
+    (( g == 0 )) && due+=("$n")
+  done
+
+  local max=$MYROUTINE_PARALLEL_MAX
+  (( max >= 1 )) || max=1
+  local -a pending=("${due[@]}") running=()
+  while (( ${#pending} + ${#running} > 0 )); do
+    while (( ${#running} < max && ${#pending} > 0 )); do
+      n=${pending[1]}
+      pending=(${pending[2,-1]})
+      { _mr_exec_parallel "$n" } >> "$_MR_TMPDIR/out.$n" 2>&1 &
+      running+=($!)
+    done
+    # 先頭から順に待つ。空いた枠を最速で埋める形ではないが、グループ全体が
+    # 終わるまで回すので総時間は変わらず、pid の追跡が単純に保てる。
+    wait "${running[1]}" 2>/dev/null
+    running=(${running[2,-1]})
+  done
+
+  # 出力と記録はステップ番号順。並列で走った順序をサマリに漏らさない。
+  for n in $group; do
+    _mr_hdr "$n" "$total" "${_mr_step_names[$n]}"
+    [[ -s "$_MR_TMPDIR/out.$n" ]] && cat "$_MR_TMPDIR/out.$n"
+    # res が無いのはゲートで skip / エラーとして記録済みのステップ
+    [[ -e "$_MR_TMPDIR/res.$n" ]] || continue
+    local -a f=("${(@s:	:)$(<"$_MR_TMPDIR/res.$n")}")
+    _mr_last_step_rc=${f[1]}
+    _mr_step_finalize "$n" "${f[1]}" "${f[2]}" "${f[3]}" "${f[4]}" || overall=1
+  done
+  return $overall
+}
+
 # 失敗したステップが step_abort_on_fail を宣言していれば続行可否を尋ねる。
 # 戻り値 0 = 続行 / 1 = 中断
 _mr_maybe_abort() {
@@ -788,10 +910,40 @@ _mr_maybe_abort() {
   return 1
 }
 
+# parallel と宣言されたステップが実行順で連続している範囲を探す。
+# 範囲外の番号は逐次側のエラー経路に任せる（グループにまとめない）。
+_mr_is_parallel() {
+  local n=$1
+  (( n >= 1 && n <= ${#_mr_step_files} )) || return 1
+  [[ ${_mr_step_parallel[$n]} == true ]]
+}
+
 _mr_run_sequence() {
   local -a seq=("$@")
-  local overall=0 n=""
-  for n in $seq; do
+  local overall=0 i=1 j=0 n="" m=""
+  local -a group=()
+  while (( i <= ${#seq} )); do
+    n=${seq[$i]}
+    if _mr_is_parallel "$n"; then
+      group=("$n")
+      j=$(( i + 1 ))
+      while (( j <= ${#seq} )); do
+        m=${seq[$j]}
+        _mr_is_parallel "$m" || break
+        group+=("$m")
+        (( j++ ))
+      done
+      # 1 つだけなら並列にする意味がない。出力を溜めずそのまま逐次で流す。
+      if (( ${#group} == 1 )); then
+        _mr_run_step "$n" || overall=1
+      else
+        _mr_run_parallel_group "${group[@]}" || overall=1
+      fi
+      # parallel ステップは step_abort_on_fail を宣言できない（discover で弾く）ため、
+      # ここで中断可否を尋ねる必要はない。
+      i=$j
+      continue
+    fi
     _mr_run_step "$n" || overall=1
     if ! _mr_maybe_abort "$n"; then
       # 後続ステップを実行していないため要対応の集合が欠けている。
@@ -800,6 +952,7 @@ _mr_run_sequence() {
       _mr_finish 1
       return 1
     fi
+    (( i++ ))
   done
   _mr_finish $overall
   return $overall
@@ -997,14 +1150,21 @@ _mr_summary_human() {
   fi
   print -r -- "${_MR_C_BOLD}════════════════════════════════════════════${_MR_C_RESET}"
 
-  # 所要時間
+  # 所要時間。並列グループがあるとステップ別の合計は実時間を超えるため、
+  # 見出しは実時間（wall clock）にし、合計は差があるときだけ添える。
   local total_ms=0 n=0 shown=0
   for (( n = 1; n <= ${#_mr_step_files}; n++ )); do
     [[ -n ${_mr_result_ms[$n]:-} ]] || continue
     (( total_ms += _mr_result_ms[$n] ))
     shown=1
   done
-  (( shown )) && print -r -- "${_MR_C_DIM}  所要 $(_mr_fmt_ms $total_ms)${_MR_C_RESET}"
+  if (( shown )); then
+    local wall_ms=$(( $(_mr_now_ms) - _MR_RUN_T0 ))
+    local line="  所要 $(_mr_fmt_ms $wall_ms)"
+    # 1 秒以上の開きがあるときだけ内訳を出す（並列で稼いだ分が見える）
+    (( total_ms - wall_ms >= 1000 )) && line+="（ステップ合計 $(_mr_fmt_ms $total_ms)）"
+    print -r -- "${_MR_C_DIM}${line}${_MR_C_RESET}"
+  fi
 }
 
 _mr_json_escape() {
@@ -1101,6 +1261,7 @@ _mr_show_list() {
     [[ ${_mr_step_critical[$n]} == true ]] && mark+=" ${_MR_C_YELLOW}(critical)${_MR_C_RESET}"
     [[ ${_mr_step_destructive[$n]} == true ]] && mark+=" ${_MR_C_RED}(破壊的)${_MR_C_RESET}"
     [[ ${_mr_step_abort[$n]} == true ]] && mark+=" ${_MR_C_DIM}(失敗時に続行確認)${_MR_C_RESET}"
+    [[ ${_mr_step_parallel[$n]} == true ]] && mark+=" ${_MR_C_GREEN}(parallel)${_MR_C_RESET}"
     if [[ ${_mr_step_cadence[$n]} != daily || -n ${_mr_step_weekday[$n]} ]]; then
       local cad="${_mr_step_cadence[$n]}"
       [[ -n ${_mr_step_weekday[$n]} ]] && cad+="/${(k)_MR_WEEKDAYS[(r)${_mr_step_weekday[$n]}]}"
@@ -1168,6 +1329,8 @@ _mr_with_log() {
 # ─────────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────────
+
+_MR_RUN_T0=$(_mr_now_ms)
 
 if ! mkdir -p "$MYROUTINE_LOG_DIR"; then
   print -ru2 -- "ERROR: 状態ディレクトリを作成できません: $MYROUTINE_LOG_DIR"

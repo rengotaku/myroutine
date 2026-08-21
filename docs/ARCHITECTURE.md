@@ -11,6 +11,7 @@ myroutine (bin/myroutine)          ← FW。この 1 ファイルで完結する
   │
   ├─ 探索      steps.d/NN-*.sh をファイル名順に読み、番号を導出する
   ├─ 実行      1 ステップ = 1 サブシェル。タイムアウト監視付き
+  │            step_parallel の連続範囲は 1 グループとして同時に実行する
   ├─ 集約      ステップからの報告を fd 3 経由で受け取る
   ├─ 分析      履歴と突き合わせて連続日数・NEW・解消を出す
   └─ 出力      人間向けサマリ / --json / 日次ログ
@@ -45,14 +46,19 @@ main
  │    └─ _mr_read_meta       サブシェルで source。stdout は捨て、fd 4 でメタだけ取る
  ├─ _mr_acquire_lock         mkdir で排他。stale なら pid 生存確認のうえ回収
  └─ _mr_run_sequence
-      ├─ _mr_run_step  (各ステップ)
-      │    ├─ _mr_check_requires    前提が欠けていれば skip（失敗ではない）
-      │    ├─ _mr_cadence_due       前回成功日から間隔が足りなければ skip（週次・月次）
-      │    ├─ 破壊的ゲート           dry-run なら実行しない / --yes 無しなら confirm
+      ├─ _mr_run_step  (逐次のステップ)
+      │    ├─ _mr_step_gate         実行前のふるい。skip / エラーはここで記録して終わる
+      │    │    ├─ _mr_check_requires  前提が欠けていれば skip（失敗ではない）
+      │    │    ├─ _mr_cadence_due     前回成功日から間隔が足りなければ skip（週次・月次）
+      │    │    └─ 破壊的ゲート         dry-run なら実行しない / --yes 無しなら confirm
       │    ├─ _mr_run_with_timeout
       │    │    ├─ _mr_exec_step &  サブシェルで source → step_run → step_verify
       │    │    └─ 監視プロセス &    時間切れならマーカーを置いて木ごと kill
-      │    └─ _mr_drain             fd 3 のチャネルから報告を回収
+      │    └─ _mr_step_finalize     _mr_drain で報告を回収し、結果を分類して記録
+      ├─ _mr_run_parallel_group  (step_parallel の連続範囲)
+      │    ├─ _mr_step_gate         親で全ステップ分。出力はステップ単位に溜める
+      │    ├─ _mr_exec_parallel &   実行だけを背景へ。結果はファイルで返す
+      │    └─ 番号順に flush        溜めた出力を流し、_mr_step_finalize で記録
       ├─ _mr_maybe_abort            step_abort_on_fail の失敗なら続行可否を尋ねる
       └─ _mr_finish
            ├─ _mr_analyze_history   連続日数・NEW・解消を算出
@@ -62,7 +68,8 @@ main
 
 ## ステップとの通信
 
-ステップはサブシェルで動くため、親の配列を直接は変更できない。
+ステップはサブシェルで動くため、親の配列を直接は変更できない。chan はステップ単位
+（`chan.<番号>`）に分かれており、並列グループでも互いの報告を上書きしない。
 
 ```
 親                             子（ステップ）
@@ -120,6 +127,8 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
 | 滞留の強調しきい値 | `MYROUTINE_STREAK_WARN` |
 | 連続日数の数え方 | `_mr_analyze_history` / `_mr_history_days` |
 | ステップに渡すプリミティブを増やす | 「ステップに公開するプリミティブ」節に関数を足す |
+| ステップを並列で走らせる | 対象ステップに `step_parallel=true`。同時実行数は `MYROUTINE_PARALLEL_MAX` |
+| 並列グループの区切りを変える | ファイル名の `NN`（グループは実行順の連続範囲で決まる） |
 
 ## 触るときに壊しやすいところ
 
@@ -152,6 +161,13 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
   本体が skip に落とすことで「見ていない」側へ自動的に入る
 - **「評価できた」の定義** — `ok` のみ。fail / timeout / skip は「見ていない」側に置く。
   ここを緩めると、判定前に落ちただけで前回の要対応が「解消」と誤表示される
+- **並列グループで背景に出すもの** — 実行だけ。ゲートと記録（`_mr_record` / `_mr_actions`）を
+  背景に出すと、サブシェルからは親の配列を変更できないので要対応が黙って失われる
+- **並列グループの出力順** — 溜めた出力をステップ番号順に流す。完了順に流すと日次ログの
+  差分が実行のたびに揺れて読めなくなる
+- **並列と確認の併用** — `step_parallel` × `step_destructive` / `step_abort_on_fail` は
+  discover で弾く。実行時に弾く形にすると、設定ミスが「確認の混線」という分かりにくい
+  症状で出る
 
 ## テスト
 
