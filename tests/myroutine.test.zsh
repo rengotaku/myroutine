@@ -453,6 +453,41 @@ if [[ ! -s "$MYROUTINE_LOG_DIR/history.tsv" ]]; then pass "劣化検知: 部分�
 else fail "劣化検知: 部分実行は履歴に記録しない" "記録された"; fi
 
 # ─────────────────────────────────────────────────────────────────
+group "ルーティン (add_todo)"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-t.sh 'step_name="定常"
+step_run() { add_todo run "/routine.progress-report を回す" }'
+out=$(mr)
+assert_contains "$out" "きょう回すもの 1 件" "todo: 専用セクションに出る"
+assert_contains "$out" "[1] /routine.progress-report を回す" "todo: ステップ番号と本文が出る"
+assert_contains "$out" "要対応なし" "todo: 要対応には混ざらない"
+assert_not_contains "$out" "対応不要" "todo: 情報枠にも混ざらない"
+
+# 定常のやることなので、何日続いても劣化として強調されない
+mr >/dev/null; mr >/dev/null
+out=$(mr)
+assert_not_contains "$out" "日連続" "todo: 連続日数が付かない"
+assert_not_contains "$out" "NEW"    "todo: NEW が付かない"
+if ! grep -q "t.run" "$MYROUTINE_LOG_DIR/history.tsv"; then
+  pass "todo: 履歴に記録しない"
+else
+  fail "todo: 履歴に記録しない" "$(cat "$MYROUTINE_LOG_DIR/history.tsv")"
+fi
+
+# 要対応が消えても todo は残る（枠が独立している）
+newenv
+mkstep 10-both.sh 'step_name="両方"
+step_run() { add_action bad "劣化した"; add_todo run "毎日やる" }'
+out=$(mr)
+assert_contains "$out" "劣化した" "todo: 要対応と併存する (1)"
+assert_contains "$out" "毎日やる" "todo: 要対応と併存する (2)"
+
+json=$("$MR" --no-lock --json </dev/null 2>/dev/null)
+assert_contains "$json" '"todos":[{"step":1,"id":"both.run","text":"毎日やる"}]' "todo: --json に todos として出る"
+
+# ─────────────────────────────────────────────────────────────────
 group "所要時間と --json"
 # ─────────────────────────────────────────────────────────────────
 

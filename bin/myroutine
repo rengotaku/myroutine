@@ -52,13 +52,20 @@
 # ステップ本体から使えるもの:
 #
 #   ok / warn / err / info               出力ヘルパー
-#   add_action <id> "<やること>"          要対応サマリに載る
+#   add_action <id> "<やること>"          要対応サマリに載る（劣化検知の対象）
+#   add_todo   <id> "<きょう回すもの>"     ルーティンセクションに載る（劣化検知の対象外）
 #   add_info   <id> "<事後報告>"          情報セクションに載る
 #   capture [-d 既定値] VAR cmd...        コマンド失敗を検知できる形で出力を受け取る
 #   confirm "<問い>"                      確認プロンプト (tty 不在なら中止側へ倒れる)
 #   run cmd...                            副作用の実行 (dry-run では実行しない)
 #
-# add_action / add_info にステップ番号は渡さない。id はステップ内で一意な短い名前で
+# add_action と add_todo の使い分け:
+#   add_action は「本来は無いはずのものが出ている」= 劣化。放置されると連続日数が
+#   伸びて強調される。add_todo は「毎日そこにある定常のやること」で、履歴に残さない
+#   ため連続日数も NEW / 解消も付かない。定常のものを add_action に載せると、
+#   劣化していないのに連続日数だけが伸び、要対応ボックス全体が信用を失う。
+#
+# add_action / add_todo / add_info にステップ番号は渡さない。id はステップ内で一意な短い名前で
 # よく、本体がファイル名から導いた slug を前置して「<slug>.<id>」に正規化する。
 # id は連続掲示日数の追跡キーなので、件数などの可変値を含めないこと。
 #
@@ -182,6 +189,7 @@ _mr_unescape() {
   print -r -- "$t"
 }
 add_action() { _mr_emit A "$1" "$2" }
+add_todo()   { _mr_emit T "$1" "$2" }
 add_info()   { _mr_emit I "$1" "$2" }
 
 # 判定に使う値を fail-open で取らせないための唯一の入口。
@@ -266,7 +274,7 @@ run() {
 # 収集した状態
 # ─────────────────────────────────────────────────────────────────
 
-typeset -ga _mr_actions=() _mr_infos=()          # "num\tid\ttext"
+typeset -ga _mr_actions=() _mr_todos=() _mr_infos=()   # "num\tid\ttext"
 typeset -ga _mr_step_files=() _mr_step_names=() _mr_step_slugs=()
 typeset -ga _mr_step_critical=() _mr_step_abort=() _mr_step_destructive=()
 typeset -ga _mr_step_parallel=()
@@ -664,6 +672,7 @@ _mr_drain() {
     kind=${f[1]}; num=${f[2]:-}; a=${f[3]:-}; b=${f[4]:-}
     case $kind in
       A) _mr_actions+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
+      T) _mr_todos+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
       I) _mr_infos+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
       V)
         if (( a == 0 && b != 0 )); then
@@ -1134,6 +1143,18 @@ _mr_summary_human() {
     done
   fi
 
+  # ルーティン枠。要対応と分ける理由は add_todo のコメント（契約）を参照。
+  if (( ${#_mr_todos} > 0 )); then
+    print -r -- ""
+    print -r -- "${_MR_C_BOLD}  📋 きょう回すもの ${#_mr_todos} 件${_MR_C_RESET}"
+    print -r -- ""
+    local t=""
+    for t in "${_mr_todos[@]}"; do
+      local -a q=("${(@s:	:)t}")
+      print -r -- "  ${_MR_C_BOLD}□ [${q[1]}] ${q[3]}${_MR_C_RESET}"
+    done
+  fi
+
   if (( ${#_mr_infos} > 0 || ${#_mr_resolved_ids} > 0 )); then
     print -r -- ""
     local n=$(( ${#_mr_infos} + ${#_mr_resolved_ids} ))
@@ -1213,6 +1234,15 @@ _mr_summary_json() {
     out+="{\"step\":${p[1]},\"id\":\"$(_mr_json_escape "${p[2]}")\""
     out+=",\"text\":\"$(_mr_json_escape "${p[3]}")\""
     out+=",\"streak_days\":${_mr_streak[${p[2]}]:-1},\"new\":${isnew}}"
+  done
+  out+="],\"todos\":["
+  first=1
+  local t=""
+  for t in "${_mr_todos[@]}"; do
+    local -a q=("${(@s:	:)t}")
+    (( first )) || out+=","
+    first=0
+    out+="{\"step\":${q[1]},\"id\":\"$(_mr_json_escape "${q[2]}")\",\"text\":\"$(_mr_json_escape "${q[3]}")\"}"
   done
   out+="],\"infos\":["
   first=1
