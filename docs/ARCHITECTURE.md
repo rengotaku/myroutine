@@ -12,6 +12,7 @@ myroutine (bin/myroutine)          ← FW。この 1 ファイルで完結する
   ├─ 探索      steps.d/NN-*.sh をファイル名順に読み、番号を導出する
   ├─ 実行      1 ステップ = 1 サブシェル。タイムアウト監視付き
   │            step_parallel の連続範囲は 1 グループとして同時に実行する
+  │            step_disabled が非空のステップは実行総数から外れ「居ない」扱いになる
   ├─ 集約      ステップからの報告を fd 3 経由で受け取る
   ├─ 分析      履歴と突き合わせて連続日数・NEW・解消を出す
   └─ 出力      人間向けサマリ / --json / 日次ログ
@@ -46,6 +47,7 @@ main
  │    └─ _mr_read_meta       サブシェルで source。stdout は捨て、fd 4 でメタだけ取る
  ├─ _mr_acquire_lock         mkdir で排他。stale なら pid 生存確認のうえ回収
  └─ _mr_run_sequence
+      ├─ _mr_handle_disabled  (step_disabled が非空のステップ。実行せず disabled で記録)
       ├─ _mr_run_step  (逐次のステップ)
       │    ├─ _mr_step_gate         実行前のふるい。skip / エラーはここで記録して終わる
       │    │    ├─ _mr_check_requires  前提が欠けていれば skip（失敗ではない）
@@ -143,6 +145,7 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
 | ステップに渡すプリミティブを増やす | 「ステップに公開するプリミティブ」節に関数を足す |
 | ステップを並列で走らせる | 対象ステップに `step_parallel=true`。同時実行数は `MYROUTINE_PARALLEL_MAX` |
 | 並列グループの区切りを変える | ファイル名の `NN`（グループは実行順の連続範囲で決まる） |
+| ステップを設定ごと無効化する | 対象ステップに `step_disabled="<理由>"` |
 
 ## 触るときに壊しやすいところ
 
@@ -182,6 +185,10 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
 - **並列と確認の併用** — `step_parallel` × `step_destructive` / `step_abort_on_fail` は
   discover で弾く。実行時に弾く形にすると、設定ミスが「確認の混線」という分かりにくい
   症状で出る
+- **無効ステップの番号体系** — ヘッダーの `[n/N]` は `_mr_enabled_pos` / `_MR_ENABLED_TOTAL`
+  （無効ステップを除いた位置と総数）を使うが、`myroutine ls` / 要対応 / `--json` の番号は
+  生のファイル順インデックス（`_mr_step_files` の添字）のまま。2 つの番号体系を混同すると
+  ヘッダーの表示と一覧の番号が食い違って見える
 
 ## テスト
 

@@ -107,6 +107,7 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 | `step_timeout` | `600` | 秒。`0` で無制限 |
 | `step_cadence` | `daily` | `daily` / `weekly` / `biweekly` / `monthly`。前回成功日からの間隔が足りなければ失敗ではなく skip |
 | `step_cadence_weekday` | （なし） | `mon`..`sun` / `1`..`7`。指定すると「間隔を満たし、かつその曜日」のときだけ実行する |
+| `step_disabled` | 空文字列 | 非空文字列（無効化の理由）を入れると実行しない。番号指定でも実行しない。実行総数・ヘッダー番号から外れ、結果は `disabled` として記録され要対応の解消判定・連続日数・履歴に影響しない。`true`/`false` はエラーになる（bool ではなく理由の文字列） |
 
 ### 関数
 

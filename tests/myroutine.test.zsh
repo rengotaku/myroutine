@@ -1191,6 +1191,117 @@ out=$(mr)
 assert_not_contains "$out" "ステップ合計" "逐次では内訳を添えない"
 
 # ─────────────────────────────────────────────────────────────────
+group "無効化 (step_disabled)"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { ok A }'
+mkstep 20-off.sh 'step_name="無効"
+step_disabled="2026-09-17: 検証用に無効化した"
+step_run() { touch "'"$MR_TD"'/off-ran" }'
+mkstep 30-c.sh 'step_name="C"
+step_run() { ok C }'
+out=$(mr)
+if [[ ! -e "$MR_TD/off-ran" ]]; then
+  pass "disabled: 無効ステップは実行されない"
+else
+  fail "disabled: 無効ステップは実行されない" "step_run が走ってファイルができていた"
+fi
+assert_eq "$(mr_rc)" "0" "disabled: 無効ステップがあっても全体は成功で終わる"
+
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { ok A }'
+mkstep 20-off.sh 'step_name="無効"
+step_disabled="無効化した"
+step_run() { : }'
+mkstep 30-c.sh 'step_name="C"
+step_run() { ok C }'
+out=$(mr)
+assert_contains "$out" "[1/2] A" "disabled: 実行総数から無効ステップを除いて数える (1)"
+assert_contains "$out" "[2/2] C" "disabled: 実行総数から無効ステップを除いて数える (2)"
+assert_not_contains "$out" "] 無効 ━" "disabled: 無効ステップのヘッダーは全体実行では出ない"
+
+newenv
+mkstep 10-off.sh 'step_name="無効"
+step_disabled="tmux 運用をやめたため"
+step_run() { : }'
+out=$(mr)
+assert_contains "$out" "ℹ 情報" "disabled: 情報セクションが出る"
+assert_contains "$out" "⊘ 無効中: [1] 無効 — tmux 運用をやめたため" "disabled: 情報セクションに理由付きで載る"
+assert_not_contains "$out" "⚠ 要対応" "disabled: 要対応セクションには載らない"
+assert_contains "$out" "✓ 要対応なし" "disabled: 無効ステップだけなら要対応なしのまま"
+
+newenv
+mkstep 10-off.sh 'step_name="無効"
+step_disabled="番号指定でも実行しない"
+step_run() { touch "'"$MR_TD"'/off-ran" }'
+out=$(mr 1)
+if [[ ! -e "$MR_TD/off-ran" ]]; then
+  pass "disabled: 番号指定実行でも実行されない"
+else
+  fail "disabled: 番号指定実行でも実行されない" "step_run が走ってファイルができていた"
+fi
+assert_contains "$out" "⊘ 無効: 番号指定でも実行しない" "disabled: 番号指定実行では理由を表示する"
+assert_contains "$out" "戻すには steps.d/10-off.sh の step_disabled を消す" "disabled: 番号指定実行では戻し方を表示する"
+
+newenv
+mkstep 10-bad.sh 'step_name="不正"
+step_disabled=true
+step_run() { : }'
+out=$(mr)
+assert_contains "$out" "step_disabled には無効化の理由を書いてください（true/false は不可）" "disabled: true/false はエラーにする"
+assert_eq "$(mr_rc)" "1" "disabled: true/false のエラーで終了コードが 1 になる"
+
+newenv
+mkstep 10-bad.sh 'step_name="不正"
+step_disabled=FALSE
+step_run() { : }'
+out=$(mr)
+assert_contains "$out" "step_disabled には無効化の理由を書いてください（true/false は不可）" "disabled: 大文字小文字を問わず true/false を拒否する"
+
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { ok A }'
+mkstep 20-off.sh 'step_name="無効"
+step_disabled="json 確認用"
+step_run() { : }'
+json=$("$MR" --no-lock --json </dev/null 2>/dev/null)
+assert_contains "$json" '"disabled":[{"n":2,"name":"無効","slug":"off","reason":"json 確認用"}]' "disabled: --json に disabled 配列として出る"
+
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { ok A }'
+json=$("$MR" --no-lock --json </dev/null 2>/dev/null)
+assert_contains "$json" '"disabled":[]' "disabled: 無効ステップが無ければ空配列になる"
+
+newenv
+mkstep 10-off1.sh 'step_name="無効1"
+step_disabled="連続性確認"
+step_parallel=true
+step_run() { : }'
+mkstep 20-off2.sh 'step_name="並列1"
+step_parallel=true
+step_run() { touch "'"$MR_TD"'/par-a" }'
+mkstep 30-off3.sh 'step_name="並列2"
+step_parallel=true
+step_run() { touch "'"$MR_TD"'/par-b" }'
+out=$(mr)
+if [[ -e "$MR_TD/par-a" && -e "$MR_TD/par-b" ]]; then
+  pass "disabled: 並列グループの前に挟まっても後続は同時に走る"
+else
+  fail "disabled: 並列グループの前に挟まっても後続は同時に走る" "$out"
+fi
+
+newenv
+mkstep 10-clean.sh 'step_name="クリーン"
+step_run() { ok done }'
+out=$(mr)
+assert_not_contains "$out" "⊘ 無効" "disabled: 無効ステップが 0 件なら出力は従来どおり"
+assert_contains "$out" "[1/1] クリーン" "disabled: 無効ステップが 0 件なら総数は変わらない"
+
+# ─────────────────────────────────────────────────────────────────
 print -r -- ""
 print -r -- "════════════════════════════════════"
 if (( FAIL == 0 )); then
