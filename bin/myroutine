@@ -43,6 +43,17 @@
 #                                  #   失敗ではなく skip。--force-cadence で無視する
 #   step_cadence_weekday=fri       # 任意。指定すると「間隔を満たし、かつその曜日」の
 #                                  #   ときだけ実行する（mon..sun / 1..7、1=月曜）
+#   step_disabled="2026-09-17: ..."  # 任意 (既定 空文字列 = 有効)。非空文字列を入れると
+#                                  #   無効化の「理由」として扱い、そのステップは実行
+#                                  #   しない（番号を指定しても実行しない）。実行総数・
+#                                  #   ヘッダー番号から外れ、結果は ok/fail/skip とは別の
+#                                  #   disabled として記録される（要対応の解消判定・
+#                                  #   連続日数・履歴には影響しない）。最終サマリの情報
+#                                  #   セクションと myroutine ls に理由が出るので、
+#                                  #   ファイル名から番号を外して一覧から消したり、
+#                                  #   存在しないパスを step_requires_path に書いて毎回
+#                                  #   skip させたりする代わりに使う。true/false は
+#                                  #   （bool ではなく理由の文字列のため）エラーになる
 #
 #   step_run()    { ... }          # 必須。終了コード 0 が成功
 #   step_verify() { ... }          # 任意。定義されていれば step_run の終了コードより
@@ -278,6 +289,9 @@ typeset -ga _mr_actions=() _mr_todos=() _mr_infos=()   # "num\tid\ttext"
 typeset -ga _mr_step_files=() _mr_step_names=() _mr_step_slugs=()
 typeset -ga _mr_step_critical=() _mr_step_abort=() _mr_step_destructive=()
 typeset -ga _mr_step_parallel=()
+typeset -ga _mr_step_disabled=()
+typeset -ga _mr_enabled_pos=()
+typeset -g _MR_ENABLED_TOTAL=0
 typeset -ga _mr_step_cadence=() _mr_step_weekday=()
 typeset -ga _mr_result_status=() _mr_result_rc=() _mr_result_ms=() _mr_result_note=()
 # 実際に実行して要対応の有無を評価できたステップの slug。
@@ -406,6 +420,7 @@ _mr_read_meta() {
     step_cadence=""
     step_cadence_weekday=""
     step_parallel=false
+    step_disabled=""
     source "$file" || exit 10
     [[ -n $step_name ]] || exit 11
     case ${step_cadence:-daily} in
@@ -417,7 +432,12 @@ _mr_read_meta() {
       [[ $step_destructive == true ]] && exit 13
       [[ $step_abort_on_fail == true ]] && exit 14
     fi
-    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}"$'\t'"${step_destructive}"$'\t'"${step_cadence:-daily}"$'\t'"${step_cadence_weekday}"$'\t'"${step_parallel}" >&4
+    # step_disabled は bool ではなく「無効化の理由」の文字列。true/false を渡す誤用は
+    # 「有効/無効を切り替えるフラグ」との混同なので、実行時に無視せず読み込み時点で弾く。
+    case ${(L)step_disabled} in
+      true|false) exit 15 ;;
+    esac
+    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}"$'\t'"${step_destructive}"$'\t'"${step_cadence:-daily}"$'\t'"${step_cadence_weekday}"$'\t'"${step_parallel}"$'\t'"${step_disabled}" >&4
   ) || rc=$?
   case $rc in
     0)  print -r -- "$out"; return 0 ;;
@@ -428,6 +448,7 @@ _mr_read_meta() {
         print -ru2 -- "       破壊的ステップの確認は stdin を読むため、並列では混線します" ;;
     14) print -ru2 -- "ERROR: step_parallel と step_abort_on_fail は併用できません: $file"
         print -ru2 -- "       後続が既に走っている状況では「続行するか」を尋ねる意味がありません" ;;
+    15) print -ru2 -- "ERROR: step_disabled には無効化の理由を書いてください（true/false は不可）: $file" ;;
     *)  print -ru2 -- "ERROR: メタデータの取得に失敗しました (rc=$rc): $file" ;;
   esac
   return 1
@@ -463,6 +484,7 @@ _mr_discover() {
     fi
     _mr_step_weekday+=("$wd")
     _mr_step_parallel+=("${parts[7]:-false}")
+    _mr_step_disabled+=("${parts[8]:-}")
     slug=$(_mr_slug_of "$f")
     # slug は action id の前置に使われ、履歴ではカンマ区切りで並ぶ。
     # 区切り文字が混ざると連続日数・NEW・解消の追跡が壊れる。
@@ -481,6 +503,19 @@ _mr_discover() {
     seen_slugs+=("$slug")
     _mr_step_slugs+=("$slug")
   done
+
+  # 進捗ヘッダー [n/N] は無効ステップを数えない。有効ステップだけに詰め直した
+  # 位置と総数をここで先に確定させる（実行中に毎回数え直さないため）。
+  local k=1 pos=0
+  for (( k = 1; k <= ${#_mr_step_files}; k++ )); do
+    if [[ -z ${_mr_step_disabled[$k]} ]]; then
+      (( pos++ ))
+      _mr_enabled_pos[$k]=$pos
+    else
+      _mr_enabled_pos[$k]=0
+    fi
+  done
+  _MR_ENABLED_TOTAL=$pos
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -807,7 +842,7 @@ _mr_run_step() {
   fi
 
   local name=${_mr_step_names[$n]} file=${_mr_step_files[$n]} slug=${_mr_step_slugs[$n]}
-  _mr_hdr "$n" "$total" "$name"
+  _mr_hdr "${_mr_enabled_pos[$n]}" "$_MR_ENABLED_TOTAL" "$name"
 
   local g=0
   _mr_step_gate "$n" || g=$?
@@ -860,7 +895,7 @@ _mr_exec_parallel() {
 
 _mr_run_parallel_group() {
   local -a group=("$@")
-  local total=${#_mr_step_files} n="" m="" overall=0 g=0
+  local n="" m="" overall=0 g=0
   local -a due=()
 
   for n in $group; do
@@ -891,7 +926,7 @@ _mr_run_parallel_group() {
 
   # 出力と記録はステップ番号順。並列で走った順序をサマリに漏らさない。
   for n in $group; do
-    _mr_hdr "$n" "$total" "${_mr_step_names[$n]}"
+    _mr_hdr "${_mr_enabled_pos[$n]}" "$_MR_ENABLED_TOTAL" "${_mr_step_names[$n]}"
     [[ -s "$_MR_TMPDIR/out.$n" ]] && cat "$_MR_TMPDIR/out.$n"
     # res が無いのはゲートで skip / エラーとして記録済みのステップ
     [[ -e "$_MR_TMPDIR/res.$n" ]] || continue
@@ -927,17 +962,42 @@ _mr_is_parallel() {
   [[ ${_mr_step_parallel[$n]} == true ]]
 }
 
+# step_disabled が非空のステップは実行せず、理由と disabled ステータスだけを記録する。
+# 全体実行では「居ない」ものとして扱い出力しない。番号指定実行（_MR_FULL_RUN=0）は
+# 明示指定を尊重し、なぜ実行しなかったかと戻し方を出す。
+_mr_handle_disabled() {
+  local n=$1
+  local reason=${_mr_step_disabled[$n]}
+  if (( ! _MR_FULL_RUN )); then
+    print -r -- "  ${_MR_C_DIM}⊘ 無効: ${reason}${_MR_C_RESET}"
+    print -r -- "    戻すには steps.d/${_mr_step_files[$n]:t} の step_disabled を消す"
+  fi
+  _mr_record "$n" disabled 0 0 "$reason"
+}
+
 _mr_run_sequence() {
   local -a seq=("$@")
   local overall=0 i=1 j=0 n="" m=""
   local -a group=()
   while (( i <= ${#seq} )); do
     n=${seq[$i]}
+    if [[ -n ${_mr_step_disabled[$n]} ]]; then
+      _mr_handle_disabled "$n"
+      (( i++ ))
+      continue
+    fi
     if _mr_is_parallel "$n"; then
       group=("$n")
       j=$(( i + 1 ))
       while (( j <= ${#seq} )); do
         m=${seq[$j]}
+        if [[ -n ${_mr_step_disabled[$m]} ]]; then
+          # 無効ステップは「居ない」ものとして飛ばす。両隣が parallel なら
+          # グループの連続性はこれで壊れない。
+          _mr_handle_disabled "$m"
+          (( j++ ))
+          continue
+        fi
         _mr_is_parallel "$m" || break
         group+=("$m")
         (( j++ ))
@@ -1090,7 +1150,7 @@ _mr_duration_field() {
   local n=0
   for (( n = 1; n <= ${#_mr_step_files}; n++ )); do
     [[ -n ${_mr_result_ms[$n]:-} ]] || continue
-    [[ ${_mr_result_status[$n]:-} == skip ]] && continue
+    [[ ${_mr_result_status[$n]:-} == (skip|disabled) ]] && continue
     out+=("${_mr_step_slugs[$n]}=${_mr_result_ms[$n]}")
   done
   print -r -- "${(j:,:)out}"
@@ -1155,9 +1215,15 @@ _mr_summary_human() {
     done
   fi
 
-  if (( ${#_mr_infos} > 0 || ${#_mr_resolved_ids} > 0 )); then
+  local -a disabled_nums=()
+  local dn=0
+  for (( dn = 1; dn <= ${#_mr_step_files}; dn++ )); do
+    [[ -n ${_mr_step_disabled[$dn]:-} ]] && disabled_nums+=("$dn")
+  done
+
+  if (( ${#_mr_infos} > 0 || ${#_mr_resolved_ids} > 0 || ${#disabled_nums} > 0 )); then
     print -r -- ""
-    local n=$(( ${#_mr_infos} + ${#_mr_resolved_ids} ))
+    local n=$(( ${#_mr_infos} + ${#_mr_resolved_ids} + ${#disabled_nums} ))
     print -r -- "${_MR_C_CYAN}${_MR_C_BOLD}  ℹ 情報 ${n} 件（対応不要）${_MR_C_RESET}"
     print -r -- ""
     local i=""
@@ -1167,6 +1233,9 @@ _mr_summary_human() {
     done
     for i in $_mr_resolved_ids; do
       print -r -- "  ${_MR_C_GREEN}· 解消: ${i}${_MR_C_RESET}"
+    done
+    for dn in "${disabled_nums[@]}"; do
+      print -r -- "  ${_MR_C_DIM}⊘ 無効中: [${dn}] ${_mr_step_names[$dn]} — ${_mr_step_disabled[$dn]}${_MR_C_RESET}"
     done
   fi
   print -r -- "${_MR_C_BOLD}════════════════════════════════════════════${_MR_C_RESET}"
@@ -1260,6 +1329,18 @@ _mr_summary_json() {
     first=0
     out+="\"$(_mr_json_escape "$i")\""
   done
+  out+="],\"disabled\":["
+  first=1
+  local dn=0
+  for (( dn = 1; dn <= ${#_mr_step_files}; dn++ )); do
+    [[ -n ${_mr_step_disabled[$dn]:-} ]] || continue
+    (( first )) || out+=","
+    first=0
+    out+="{\"n\":${dn}"
+    out+=",\"name\":\"$(_mr_json_escape "${_mr_step_names[$dn]}")\""
+    out+=",\"slug\":\"$(_mr_json_escape "${_mr_step_slugs[$dn]}")\""
+    out+=",\"reason\":\"$(_mr_json_escape "${_mr_step_disabled[$dn]}")\"}"
+  done
   out+="]}"
   print -r -- "$out" >&$_MR_JSON_FD
 }
@@ -1299,6 +1380,7 @@ _mr_show_list() {
     fi
     print -r -- "  ${_MR_C_CYAN}${n}.${_MR_C_RESET} ${_mr_step_names[$n]}${mark}"
     print -r -- "     ${_MR_C_DIM}${_mr_step_files[$n]:t}  slug=${_mr_step_slugs[$n]}${_MR_C_RESET}"
+    [[ -n ${_mr_step_disabled[$n]:-} ]] && print -r -- "     ${_MR_C_DIM}⊘ 無効: ${_mr_step_disabled[$n]}${_MR_C_RESET}"
   done
 }
 
