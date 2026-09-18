@@ -22,6 +22,9 @@ var cond = &runewidth.Condition{
 var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 // Width は s の表示幅を返す。ANSI エスケープシーケンスは幅 0 として扱う。
+// 着色を閉じるための SGR reset。切り詰めで閉じが落ちたときに補う。
+const ansiReset = "\x1b[0m"
+
 func Width(s string) int {
 	return cond.StringWidth(stripANSI(s))
 }
@@ -88,7 +91,15 @@ func Truncate(s string, w int) string {
 	if budget == 0 {
 		return ellipsis
 	}
-	return b.String() + ellipsis
+	// 切り詰めた位置より後ろに閉じの reset があると一緒に捨ててしまい、以降の
+	// 行まで着色が残る。ステップの出力（tail 抜粋）は色付きで来るので実際に
+	// 起きる。保持したぶんにエスケープが含まれ、reset で終わっていなければ
+	// 自分で閉じる。
+	out := b.String()
+	if strings.Contains(out, "\x1b[") && !strings.HasSuffix(out, ansiReset) {
+		out += ansiReset
+	}
+	return out + ellipsis
 }
 
 // WrapWidth は s の表示幅が w を超える場合、末尾を "…" にせず複数行へ折り返す
