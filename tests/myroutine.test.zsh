@@ -76,6 +76,8 @@ mr_rc() { "$MR" --no-lock "$@" </dev/null >/dev/null 2>&1; print -r -- $? }
 # stdout だけを返す（--jsonl / --json は stdout と stderr を厳密に分けているため、
 # 「stdout に人間向け出力が混ざっていないか」の検証には 2>&1 で混ぜてはいけない）。
 mr_stdout() { "$MR" --no-lock "$@" 2>/dev/null </dev/null }
+# stderr だけを返す（step_interactive の出力先を検証するため、stdout と混ぜない）。
+mr_stderr() { "$MR" --no-lock "$@" 2>&1 1>/dev/null </dev/null }
 
 # ─────────────────────────────────────────────────────────────────
 group "ステップ探索とプラグイン性"
@@ -1115,6 +1117,15 @@ step_run() { : }'
 out=$(mr ls)
 assert_contains "$out" "step_parallel と step_abort_on_fail は併用できません" "parallel: abort_on_fail との併用をエラーにする"
 
+newenv
+mkstep 10-pi.sh 'step_name="対話かつ並列"
+step_parallel=true
+step_interactive=true
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "step_parallel と step_interactive は併用できません" "parallel: interactive との併用をエラーにする"
+assert_eq "$(mr_rc ls)" "1" "parallel: interactive との併用で終了コードが 1"
+
 # 一覧に印が出る
 newenv
 mkstep 10-pl.sh 'step_name="並列ステップ"
@@ -1494,6 +1505,46 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────
+group "--jsonl と step_interactive"
+# ─────────────────────────────────────────────────────────────────
+
+# step_interactive=true の出力は、--jsonl 実行中でも stderr へそのまま流れる。
+# 宣言していないステップの出力は stdout にも stderr にも出ず、ログにだけ残る。
+newenv
+mkstep 10-quiet.sh 'step_name="宣言なし"
+step_run() { print -r -- "quiet の出力"; return 0 }'
+mkstep 20-loud.sh 'step_name="対話ステップ"
+step_interactive=true
+step_run() { print -r -- "対話ステップの出力"; return 0 }'
+stdout_out=$(mr_stdout --jsonl)
+stderr_out=$(mr_stderr --jsonl)
+
+assert_contains "$stderr_out" "対話ステップの出力" "interactive: 宣言したステップの出力が stderr に出る"
+assert_not_contains "$stdout_out" "対話ステップの出力" "interactive: 生出力が stdout の JSONL に混ざらない"
+assert_all_lines_valid_json "$stdout_out" "interactive: stdout の全行が妥当な JSON のまま保たれる"
+
+assert_not_contains "$stderr_out" "quiet の出力" "interactive: 宣言していないステップの出力は stderr に出ない"
+assert_not_contains "$stdout_out" "quiet の出力" "interactive: 宣言していないステップの出力は stdout にも出ない"
+
+log_file="$MYROUTINE_LOG_DIR/$(date +%Y-%m-%d).txt"
+if [[ -f $log_file ]] && grep -q "対話ステップの出力" "$log_file"; then
+  pass "interactive: 宣言したステップの出力もログファイルに残る"
+else
+  fail "interactive: 宣言したステップの出力もログファイルに残る" "$(cat "$log_file" 2>/dev/null)"
+fi
+
+# 失敗時の tail は step_interactive の有無にかかわらず従来どおり JSON に載る。
+newenv
+mkstep 10-loud-fail.sh 'step_name="対話ステップ失敗"
+step_interactive=true
+step_run() { local i=0; for (( i = 1; i <= 25; i++ )); do print -r -- "line ${i}"; done; return 1 }'
+out=$(mr_stdout --jsonl)
+fail_line=$(print -r -- "$out" | grep '"slug":"loud-fail"')
+assert_contains "$fail_line" '"status":"fail"' "interactive: 失敗ステップの status"
+assert_contains "$fail_line" '"tail":["line 6"' "interactive: 失敗時の tail は従来どおり末尾 20 行に切り詰められる"
+assert_contains "$fail_line" '"line 25"]' "interactive: 失敗時の tail に最終行まで含まれる"
+
+# ─────────────────────────────────────────────────────────────────
 print -r -- ""
 print -r -- "════════════════════════════════════"
 if (( FAIL == 0 )); then
@@ -1501,5 +1552,38 @@ if (( FAIL == 0 )); then
 else
   print -ru2 -- "  失敗 ${FAIL} 件 / 成功 ${PASS} 件"
 fi
+# ─────────────────────────────────────────────────────────────────
+group "--jsonl とパイプの読み手"
+# ─────────────────────────────────────────────────────────────────
+
+# 読み手が JSONL を読み切る前に終了すると、fd は壊れたパイプになる。SIGPIPE を
+# ハンドラで受けるとハンドラの中から子を畳むことになり waitjobs で止まる
+# （TERM も queue されるので kill -9 しか効かない）。write の戻り値で畳むこと。
+newenv
+mkstep 10-alpha.sh 'step_name="アルファ"
+step_run() { ok run }'
+
+# 読み手が即死する構成。ハングしていれば timeout の 10 秒を使い切る。
+_t0=$EPOCHSECONDS
+( "$MR" --no-lock --jsonl </dev/null 2>/dev/null | true ) &
+_pipe_pid=$!
+_waited=0
+while (( _waited < 100 )); do
+  kill -0 $_pipe_pid 2>/dev/null || break
+  sleep 0.1
+  (( _waited++ ))
+done
+if kill -0 $_pipe_pid 2>/dev/null; then
+  kill -9 $_pipe_pid 2>/dev/null
+  assert_eq "hang" "exit" "jsonl: 読み手が先に終わっても実行が終了する"
+else
+  assert_eq "exit" "exit" "jsonl: 読み手が先に終わっても実行が終了する"
+fi
+wait $_pipe_pid 2>/dev/null
+
+# 読み手が生きている通常の構成は従来どおり全イベントが届く。
+_out=$("$MR" --no-lock --jsonl </dev/null 2>/dev/null | cat)
+assert_eq "$(print -r -- "$_out" | grep -c '"ev"')" "3" "jsonl: 読み手が生きていれば run/step/summary が揃う"
+
 print -r -- "════════════════════════════════════"
 exit $(( FAIL > 0 ))
