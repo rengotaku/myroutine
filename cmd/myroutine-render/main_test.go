@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rengotaku/myroutine/internal/render"
+	"github.com/rengotaku/myroutine/internal/textwidth"
 )
 
 func opt() render.Options {
@@ -115,5 +116,59 @@ func TestSkipDeferredUntilSummaryOrEOF(t *testing.T) {
 	}
 	if skipIdx < okIdx {
 		t.Fatalf("skip block should come after step b (deferred), got:\n%s", got)
+	}
+}
+
+// TestNoColorVsColorOutputDiffers は指摘4（--no-color が効かない）の
+// 回帰テスト。Options.Color の有無で process の出力が実際に変わる
+// （色が付く）ことをエンドツーエンドで確認する。
+func TestNoColorVsColorOutputDiffers(t *testing.T) {
+	in, err := os.Open("testdata/sample.jsonl")
+	if err != nil {
+		t.Fatalf("open sample: %v", err)
+	}
+	defer in.Close()
+
+	var plain bytes.Buffer
+	process(in, &plain, false, render.Options{Width: 100, Color: false})
+
+	in2, err := os.Open("testdata/sample.jsonl")
+	if err != nil {
+		t.Fatalf("open sample: %v", err)
+	}
+	defer in2.Close()
+
+	var colored bytes.Buffer
+	process(in2, &colored, false, render.Options{Width: 100, Color: true})
+
+	if plain.String() == colored.String() {
+		t.Fatalf("--no-color と色付きの出力が同一になっている（色が実装されていない）")
+	}
+	if !strings.Contains(colored.String(), "\x1b[") {
+		t.Fatalf("Color: true の出力に ANSI エスケープが含まれていない")
+	}
+	if strings.Contains(plain.String(), "\x1b[") {
+		t.Fatalf("Color: false の出力に ANSI エスケープが混ざっている")
+	}
+}
+
+// TestColoredOutputVisibleWidthMatchesWidthOption は色付き出力の各行の
+// 表示幅（ANSI を除いた実表示幅）が --width の指定を超えないことを確認する
+// （指摘4: 桁揃えが色付きでも崩れないこと）。
+func TestColoredOutputVisibleWidthMatchesWidthOption(t *testing.T) {
+	const width = 100
+	in, err := os.Open("testdata/sample.jsonl")
+	if err != nil {
+		t.Fatalf("open sample: %v", err)
+	}
+	defer in.Close()
+
+	var out bytes.Buffer
+	process(in, &out, false, render.Options{Width: width, Color: true})
+
+	for i, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
+		if w := textwidth.Width(line); w > width {
+			t.Fatalf("行 %d の実表示幅 (%d) が --width (%d) を超えている: %q", i, w, width, line)
+		}
 	}
 }

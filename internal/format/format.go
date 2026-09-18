@@ -19,7 +19,27 @@ const (
 	iconSkip = "⊘"
 
 	nameCol = 32 // ステップ名 + summary を揃える表示幅
+
+	// iconRuneLen は iconOK / iconFail / iconSkip がいずれも 1 rune であることに
+	// 依存した定数。着色対象（先頭何 rune か）を render 側に伝えるのに使う。
+	iconRuneLen = 1
 )
+
+// styleForIcon は見出しに使う icon 文字列（iconOK / iconFail / iconSkip）を
+// render.Style に対応付ける。整形（どの記号を使うか）は format 側の責務のまま、
+// 実際の色コードは render パッケージに閉じ込める。
+func styleForIcon(icon string) render.Style {
+	switch icon {
+	case iconOK:
+		return render.StyleOK
+	case iconFail:
+		return render.StyleFail
+	case iconSkip:
+		return render.StyleSkip
+	default:
+		return render.StyleNone
+	}
+}
 
 // State は 1 回の実行分の処理状態を持つ。
 type State struct {
@@ -44,9 +64,21 @@ func (s *State) Run(r eventlog.RunEvent) {
 // Step は step イベントを処理し、即座に描画すべき Block を返す。
 // status が skip の場合は描画せず内部に溜め、空の Block を返す
 // （呼び出し側は Lines が空なら Render しなくてよい）。
+// isFailStatus は tail 展開・rc 表示・全文ログ導線を出すべき失敗系ステータスか
+// を判定する。timeout は fail と別ステータスだが、読み手にとっては同じく
+// 「失敗として調べる対象」なので同列に扱う。
+func isFailStatus(status string) bool {
+	return status == "fail" || status == "timeout"
+}
+
 func (s *State) Step(st eventlog.StepEvent) render.Block {
-	if st.Status == "skip" {
+	switch st.Status {
+	case "skip":
 		s.pendingSkip = append(s.pendingSkip, st)
+		return render.Block{}
+	case "disabled":
+		// disabled は summary イベントの Disabled 一覧（「⊘ 無効」ブロック）
+		// だけで出す。ここで即時描画すると同じステップが二重に出る。
 		return render.Block{}
 	}
 	return render.Block{Lines: s.stepLines(st)}
@@ -54,8 +86,10 @@ func (s *State) Step(st eventlog.StepEvent) render.Block {
 
 func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 	icon := iconOK
-	if st.Status == "fail" {
+	iconStyle := render.StyleOK
+	if isFailStatus(st.Status) {
 		icon = iconFail
+		iconStyle = render.StyleFail
 	}
 
 	nameAndSummary := st.Name
@@ -63,26 +97,48 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 		nameAndSummary = textwidth.Pad(nameAndSummary, nameCol) + st.Summary
 	}
 
-	label := fmt.Sprintf("%s [%d/%d] %s", icon, st.N, s.total, nameAndSummary)
-	right := formatDuration(st.DurationMs)
-	if st.Status == "fail" && st.RC != 0 {
-		right = right + "  rc=" + strconv.Itoa(st.RC)
+	// pos は run イベントの total と同じ集合（今回実行した無効化されていない
+	// ステップ）で数えた通し番号。n（ステップ固有番号）は要対応サマリの
+	// 「[3] ...」との対応付けに使うため、進捗表示にはこちらを使う。
+	// pos を持たない古い入力（0 のまま）では従来どおり n にフォールバックする。
+	pos := st.Pos
+	if pos == 0 {
+		pos = st.N
 	}
 
-	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label, Right: right}}
+	label := fmt.Sprintf("%s [%d/%d] %s", icon, pos, s.total, nameAndSummary)
+	right := formatDuration(st.DurationMs)
+	switch st.Status {
+	case "fail":
+		if st.RC != 0 {
+			right = right + "  rc=" + strconv.Itoa(st.RC)
+		}
+	case "timeout":
+		// rc だけでは通常の失敗と区別が付かない。制限秒数（note に
+		// "${limit}s" の形で入っている）を出してタイムアウトと分かるようにする。
+		right = right + "  timeout"
+		if st.Note != "" {
+			right = right + " " + st.Note
+		}
+		if st.RC != 0 {
+			right = right + "  rc=" + strconv.Itoa(st.RC)
+		}
+	}
 
-	showTail := st.Status == "fail" || (s.Verbose && len(st.Tail) > 0)
+	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label, Right: right, IconLen: iconRuneLen, IconStyle: iconStyle}}
+
+	showTail := isFailStatus(st.Status) || (s.Verbose && len(st.Tail) > 0)
 	if showTail && len(st.Tail) > 0 {
 		tail := st.Tail
 		if len(tail) > 4 {
 			tail = tail[len(tail)-4:]
 		}
 		for _, t := range tail {
-			lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: "│ " + t})
+			lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: "│ " + t, Dim: true})
 		}
 	}
-	if st.Status == "fail" && s.log != "" {
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: "└ 全文: " + shortenPath(s.log)})
+	if isFailStatus(st.Status) && s.log != "" {
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: "└ 全文: " + shortenPath(s.log), Dim: true})
 	}
 	return lines
 }
@@ -94,12 +150,12 @@ func (s *State) FlushSkips() render.Block {
 		return render.Block{}
 	}
 	lines := []render.Line{
-		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s skip %d 件", iconSkip, len(s.pendingSkip))},
+		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s skip %d 件", iconSkip, len(s.pendingSkip)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconSkip)},
 	}
 	for _, st := range s.pendingSkip {
 		note := strings.TrimPrefix(st.Note, "cadence: ")
 		label := fmt.Sprintf("[%d] %s", st.N, textwidth.Pad(st.Name, nameCol)) + note
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: label})
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: label, Dim: true})
 		lines = append(lines, render.WrapText(note, 10)...)
 	}
 	s.pendingSkip = nil
@@ -143,14 +199,14 @@ func (s *State) Summary(sum eventlog.SummaryEvent) []render.Block {
 	if len(sum.Resolved) > 0 {
 		blocks = append(blocks, render.Block{Lines: []render.Line{
 			{Kind: render.KindBlank},
-			{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 解消 %d 件: %s", iconOK, len(sum.Resolved), strings.Join(sum.Resolved, ", "))},
+			{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 解消 %d 件: %s", iconOK, len(sum.Resolved), strings.Join(sum.Resolved, ", ")), IconLen: iconRuneLen, IconStyle: styleForIcon(iconOK)},
 		}})
 	}
 
 	blocks = append(blocks, render.Block{Lines: []render.Line{
 		{Kind: render.KindRule},
-		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("所要 %s   全量ログ: %s", formatDuration(sum.WallMs), shortenPath(s.log))},
-		{Kind: render.KindText, Indent: 2, Text: "再表示: myroutine last"},
+		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("所要 %s   全量ログ: %s", formatDuration(sum.WallMs), shortenPath(s.log)), Dim: true},
+		{Kind: render.KindText, Indent: 2, Text: "再表示: myroutine last", Dim: true},
 	}})
 
 	return blocks
@@ -161,12 +217,12 @@ func disabledBlock(items []eventlog.DisabledItem) render.Block {
 		return render.Block{}
 	}
 	lines := []render.Line{
-		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 無効 %d 件", iconSkip, len(items))},
+		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 無効 %d 件", iconSkip, len(items)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconSkip)},
 	}
 	for _, it := range items {
 		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: fmt.Sprintf("[%d] %s", it.N, it.Name)})
 		if it.Reason != "" {
-			lines = append(lines, render.Line{Kind: render.KindText, Indent: 10, Text: it.Reason})
+			lines = append(lines, render.Line{Kind: render.KindText, Indent: 10, Text: it.Reason, Dim: true})
 		}
 	}
 	return render.Block{Lines: lines}
@@ -199,11 +255,11 @@ func toInfoItems(ts []eventlog.InfoItem) []item {
 func actionBlock(actions []eventlog.ActionItem) render.Block {
 	if len(actions) == 0 {
 		return render.Block{Lines: []render.Line{
-			{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 要対応なし", iconOK)},
+			{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 要対応なし", iconOK), IconLen: iconRuneLen, IconStyle: styleForIcon(iconOK)},
 		}}
 	}
 	lines := []render.Line{
-		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 要対応 %d 件", iconFail, len(actions))},
+		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 要対応 %d 件", iconFail, len(actions)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconFail)},
 	}
 	for _, a := range actions {
 		first := render.FirstLine(a.Text)
@@ -229,7 +285,7 @@ func listBlock(icon, label string, n int, items []item) render.Block {
 		return render.Block{}
 	}
 	lines := []render.Line{
-		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s %s %d 件", icon, label, n)},
+		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s %s %d 件", icon, label, n), IconLen: iconRuneLen, IconStyle: styleForIcon(icon)},
 	}
 	for _, it := range items {
 		lines = append(lines, render.Line{Kind: render.KindBlank})

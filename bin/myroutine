@@ -114,6 +114,9 @@ typeset -g _MR_DRY_RUN=0 _MR_YES=0 _MR_JSON=0 _MR_JSONL=0 _MR_NO_LOCK=0 _MR_FORC
 typeset -g _MR_JSON_FD=1
 # --jsonl 専用。当日ログファイルのパスと、myroutine last が読み直すイベントファイル。
 typeset -g _MR_JSONL_LOG="" _MR_JSONL_EVENTS_FILE=""
+# --jsonl 専用。今回の実行内での無効化されていないステップの通し番号
+# （run イベントの total と分母を揃えるため。ステップ固有番号 n とは別物）。
+typeset -g _MR_JSONL_POS=0
 typeset -g _MR_LOCK_DIR="" _MR_TMPDIR=""
 # 実行全体の開始時刻。並列があるとステップ別の合計は実時間と一致しない。
 typeset -g _MR_RUN_T0=0
@@ -1470,16 +1473,25 @@ _mr_json_tail_array() {
 
 _mr_jsonl_emit_step() {
   local n=$1
+  local st_status=${_mr_result_status[$n]}
   local out="{\"ev\":\"step\""
   out+=",\"n\":${n}"
   out+=",\"name\":\"$(_mr_json_escape "${_mr_step_names[$n]}")\""
   out+=",\"slug\":\"$(_mr_json_escape "${_mr_step_slugs[$n]}")\""
-  out+=",\"status\":\"${_mr_result_status[$n]}\""
+  out+=",\"status\":\"${st_status}\""
   out+=",\"rc\":${_mr_result_rc[$n]:-0}"
   out+=",\"duration_ms\":${_mr_result_ms[$n]:-0}"
   out+=",\"summary\":\"$(_mr_json_escape "${_mr_result_summary[$n]:-}")\""
   out+=",\"note\":\"$(_mr_json_escape "${_mr_result_note[$n]:-}")\""
   out+=",\"tail\":$(_mr_json_tail_array "$n")"
+  # pos は run イベントの total と同じ集合（今回実行した無効化されていない
+  # ステップ）で数えた通し番号。n（ステップ固有番号、要対応との対応付けに使う）
+  # とは分母が異なるため別フィールドにする。disabled は total に含まれないので
+  # pos を振らない。
+  if [[ $st_status != disabled ]]; then
+    (( _MR_JSONL_POS++ ))
+    out+=",\"pos\":${_MR_JSONL_POS}"
+  fi
   out+="}"
   _mr_jsonl_write "$out"
 }
@@ -1601,6 +1613,7 @@ _mr_run_all_jsonl() {
   done
   _mr_jsonl_emit_run "$mode" "$total"
 
+  _MR_JSONL_POS=0
   local r=0
   _mr_run_sequence "${seq[@]}" || r=$?
   return $r

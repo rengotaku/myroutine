@@ -1346,16 +1346,73 @@ ok_line=$(print -r -- "$out" | grep '"slug":"ok"')
 assert_contains "$ok_line" '"status":"ok"' "jsonl: 成功ステップの status"
 assert_contains "$ok_line" '"summary":"2 lines printed"' "jsonl: emit_summary の内容が summary に載る"
 assert_contains "$ok_line" '"tail":[]' "jsonl: 成功ステップの tail は空配列"
+assert_contains "$ok_line" '"pos":1' "jsonl: pos は今回実行内での通し番号 (1)"
 
 fail_line=$(print -r -- "$out" | grep '"slug":"fail"')
 assert_contains "$fail_line" '"status":"fail"' "jsonl: 失敗ステップの status"
 assert_contains "$fail_line" '"tail":["line 6"' "jsonl: 失敗ステップの tail は末尾 20 行に切り詰められる"
 assert_contains "$fail_line" '"line 25"]' "jsonl: 失敗ステップの tail に最終行まで含まれる"
 assert_not_contains "$fail_line" '"line 5"' "jsonl: 失敗ステップの tail は先頭側を含まない（20 行より前）"
+assert_contains "$fail_line" '"pos":2' "jsonl: pos は今回実行内での通し番号 (2)"
 
 summary_line=$(jsonl_line "$out" summary)
 assert_contains "$summary_line" '"wall_ms":' "jsonl: summary イベントに wall_ms が入る"
 assert_contains "$summary_line" '"actions":[{"step":1' "jsonl: summary イベントの actions が --json と同じ構造"
+
+# timeout ステータス（指摘1: timeout が成功として描画される問題の入力側）
+newenv
+mkstep 10-hang.sh 'step_name="ハング"
+step_timeout=1
+step_run() { print -r -- "始めた"; sleep 30 }'
+out=$(mr_stdout --jsonl)
+timeout_line=$(print -r -- "$out" | grep '"slug":"hang"')
+assert_contains "$timeout_line" '"status":"timeout"' "jsonl: タイムアウトしたステップの status は timeout（ok/fail と別物）"
+assert_contains "$timeout_line" '"note":"1s"' "jsonl: タイムアウトの note に制限秒数が入る"
+assert_not_contains "$timeout_line" '"tail":[]' "jsonl: タイムアウトしたステップにも tail が入る"
+
+# 部分実行での pos/total（指摘3: 分母と分子の基準が違う問題）
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { ok A }'
+mkstep 20-b.sh 'step_name="B"
+step_run() { ok B }'
+mkstep 30-c.sh 'step_name="C"
+step_run() { ok C }'
+mkstep 40-d.sh 'step_name="D"
+step_run() { ok D }'
+mkstep 50-e.sh 'step_name="E"
+step_run() { ok E }'
+mkstep 60-f.sh 'step_name="F"
+step_run() { ok F }'
+mkstep 70-g.sh 'step_name="G"
+step_run() { ok G }'
+mkstep 80-h.sh 'step_name="H"
+step_run() { ok H }'
+mkstep 90-i.sh 'step_name="I"
+step_run() { ok I }'
+out=$(mr_stdout --jsonl 5,9)
+run_line=$(jsonl_line "$out" run)
+assert_contains "$run_line" '"total":2' "jsonl: 部分実行の total は指定したステップ数（無効ステップ除く）"
+pos_e=$(print -r -- "$out" | grep '"slug":"e"')
+assert_contains "$pos_e" '"n":5' "jsonl: 部分実行でも n はステップ固有番号のまま (5)"
+assert_contains "$pos_e" '"pos":1' "jsonl: 部分実行の pos は total と同じ集合で 1 から数える"
+pos_i=$(print -r -- "$out" | grep '"slug":"i"')
+assert_contains "$pos_i" '"n":9' "jsonl: 部分実行でも n はステップ固有番号のまま (9)"
+assert_contains "$pos_i" '"pos":2' "jsonl: 部分実行の pos は total と同じ集合で数える（2番目）"
+
+# disabled ステップの step イベント（指摘2: 即時描画で二重に出る問題の入力側）
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { ok A }'
+mkstep 20-off.sh 'step_name="無効"
+step_disabled="jsonl pos 確認用"
+step_run() { : }'
+out=$(mr_stdout --jsonl)
+run_line=$(jsonl_line "$out" run)
+assert_contains "$run_line" '"total":1' "jsonl: run の total は無効ステップを含まない"
+off_line=$(print -r -- "$out" | grep '"slug":"off"')
+assert_contains "$off_line" '"status":"disabled"' "jsonl: 無効ステップの status は disabled"
+assert_not_contains "$off_line" '"pos"' "jsonl: disabled ステップには pos を振らない（total の分母に含まれないため）"
 
 newenv
 mkstep 10-a.sh 'step_name="A"

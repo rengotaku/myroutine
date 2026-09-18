@@ -18,12 +18,16 @@ type StepEvent struct {
 	N          int      `json:"n"`
 	Name       string   `json:"name"`
 	Slug       string   `json:"slug"`
-	Status     string   `json:"status"` // ok / skip / fail
+	Status     string   `json:"status"` // ok / skip / fail / timeout / disabled
 	RC         int      `json:"rc"`
 	DurationMs int64    `json:"duration_ms"`
 	Summary    string   `json:"summary"`
 	Note       string   `json:"note"`
 	Tail       []string `json:"tail"`
+	// Pos は run イベントの total と同じ集合（今回の実行で無効化されていない
+	// ステップ）で数えた通し番号。N（ステップ固有番号）とは分母が異なるため
+	// 別フィールド。古い（pos を持たない）入力では 0 のまま届く。
+	Pos int `json:"pos"`
 }
 
 // ActionItem は要対応（放置すると困る）項目。
