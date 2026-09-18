@@ -1050,7 +1050,12 @@ _mr_run_parallel_group() {
   for n in $group; do
     _mr_hdr "${_mr_enabled_pos[$n]}" "$_MR_ENABLED_TOTAL" "${_mr_step_names[$n]}" \
       "$( [[ ${_mr_step_interactive[$n]} == true ]] && print -r -- 1 || print -r -- 0 )"
-    [[ -s "$_MR_TMPDIR/out.$n" ]] && cat "$_MR_TMPDIR/out.$n"
+    # --jsonl では stdout は JSONL 専用で、生出力はログと失敗時の tail へ回す
+    # （逐次実行の経路と同じ扱い）。ここで cat すると stderr（fd1 の付け替え先）
+    # へ漏れ、レンダラの 1 行と二重になる。
+    if (( ! _MR_JSONL )); then
+      [[ -s "$_MR_TMPDIR/out.$n" ]] && cat "$_MR_TMPDIR/out.$n"
+    fi
     # res が無いのはゲートで skip / エラーとして記録済みのステップ
     [[ -e "$_MR_TMPDIR/res.$n" ]] || continue
     local -a f=("${(@s:	:)$(<"$_MR_TMPDIR/res.$n")}")

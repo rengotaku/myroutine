@@ -1578,6 +1578,26 @@ _out=$("$MR" --no-lock --jsonl </dev/null 2>/dev/null | cat)
 assert_eq "$(print -r -- "$_out" | grep -c '"ev"')" "3" "jsonl: 読み手が生きていれば run/step/summary が揃う"
 
 # ─────────────────────────────────────────────────────────────────
+group "--jsonl と並列ステップの生出力"
+# ─────────────────────────────────────────────────────────────────
+
+# 並列グループは出力をまとめて cat し直す経路を持ち、そこだけ --jsonl の
+# 捕獲が抜けていた。stdout は JSONL 専用、生出力はログと失敗時の tail へ。
+newenv
+mkstep 10-par-a.sh 'step_name="並列A"
+step_parallel=true
+step_run() { print -r -- "並列Aの生出力"; ok done }'
+mkstep 20-par-b.sh 'step_name="並列B"
+step_parallel=true
+step_run() { print -r -- "並列Bの生出力"; ok done }'
+
+_par_out=$(mr_stdout --jsonl)
+_par_err=$(mr_stderr --jsonl)
+assert_not_contains "$_par_out" "並列Aの生出力" "jsonl 並列: 生出力が stdout に混ざらない"
+assert_not_contains "$_par_err" "並列Aの生出力" "jsonl 並列: 生出力が stderr にも出ない"
+assert_contains "$(<"$MR_TD/log/$(date +%Y-%m-%d).txt")" "並列Aの生出力" "jsonl 並列: 生出力はログに残る"
+
+# ─────────────────────────────────────────────────────────────────
 group "--jsonl とステップ見出し"
 # ─────────────────────────────────────────────────────────────────
 
