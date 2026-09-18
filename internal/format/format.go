@@ -94,7 +94,13 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 
 	nameAndSummary := st.Name
 	if st.Summary != "" {
-		nameAndSummary = textwidth.Pad(nameAndSummary, nameCol) + st.Summary
+		// Pad は列幅より長い名前をそのまま返すので、詰める分が 0 になり名前と
+		// 要約がくっつく。名前側を切り詰めて、区切りの空白を必ず残す。
+		name := st.Name
+		if textwidth.Width(name) > nameCol-1 {
+			name = textwidth.Truncate(name, nameCol-1)
+		}
+		nameAndSummary = textwidth.Pad(name, nameCol) + st.Summary
 	}
 
 	// pos は run イベントの total と同じ集合（今回実行した無効化されていない
