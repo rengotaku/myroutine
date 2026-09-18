@@ -1578,6 +1578,28 @@ _out=$("$MR" --no-lock --jsonl </dev/null 2>/dev/null | cat)
 assert_eq "$(print -r -- "$_out" | grep -c '"ev"')" "3" "jsonl: 読み手が生きていれば run/step/summary が揃う"
 
 # ─────────────────────────────────────────────────────────────────
+group "--jsonl とステップ見出し"
+# ─────────────────────────────────────────────────────────────────
+
+# --jsonl は fd1 を stderr へ付け替えるため、人間向けの見出しがそのまま画面に
+# 残る。レンダラが進捗行を出すので二重になる。ただし step_interactive は生出力が
+# stderr に流れるので、どのステップの出力かを示す見出しを残す。
+newenv
+mkstep 10-alpha.sh 'step_name="アルファ"
+step_run() { ok run }'
+mkstep 20-talk.sh 'step_name="トーク"
+step_interactive=true
+step_run() { print -r -- "対話の出力"; ok run }'
+
+_err=$(mr_stderr --jsonl)
+assert_not_contains "$_err" "アルファ" "jsonl: 通常ステップの見出しを出さない"
+assert_contains "$_err" "トーク" "jsonl: step_interactive のステップは見出しを残す"
+
+# 非 jsonl では人間向け出力は stdout 側に出る（--jsonl だけが fd を付け替える）。
+_out_plain=$(mr_stdout)
+assert_contains "$_out_plain" "アルファ" "非 jsonl: 見出しは従来どおり出る"
+
+# ─────────────────────────────────────────────────────────────────
 print -r -- ""
 print -r -- "════════════════════════════════════"
 if (( FAIL == 0 )); then

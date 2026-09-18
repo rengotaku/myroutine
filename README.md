@@ -50,10 +50,11 @@ mkdir -p ~/.config/myroutine/steps.d
 出力を整形する `myroutine-render` は別バイナリです。`--jsonl` をこれに繋ぐと、成功したステップが 1 行に畳まれ、skip がまとめて出ます（繋がなければ従来どおりの出力です）。
 
 ```sh
-make install                 # 既定は ~/.local/bin
-PREFIX=/opt/bin make install # 配置先を変える場合
+make -C myroutine install PREFIX=~/bin   # 上の ln -s と同じ、PATH の通った場所へ
 myroutine --jsonl | myroutine-render
 ```
+
+`PREFIX` の既定は `~/.local/bin` です。そこが PATH に入っていない環境（macOS の標準構成など）では、上のように PATH の通った場所を指定するか、`~/.local/bin` を PATH へ追加してください。
 
 ステップは同梱していません。`examples/steps.d/` を参考に自分で書きます。
 
