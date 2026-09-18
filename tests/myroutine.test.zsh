@@ -73,6 +73,9 @@ mkstep() {
 # tty を持たない環境で走らせることで、確認プロンプトの fail-closed も同時に検証できる。
 mr() { "$MR" --no-lock "$@" </dev/null 2>&1 }
 mr_rc() { "$MR" --no-lock "$@" </dev/null >/dev/null 2>&1; print -r -- $? }
+# stdout だけを返す（--jsonl / --json は stdout と stderr を厳密に分けているため、
+# 「stdout に人間向け出力が混ざっていないか」の検証には 2>&1 で混ぜてはいけない）。
+mr_stdout() { "$MR" --no-lock "$@" 2>/dev/null </dev/null }
 
 # ─────────────────────────────────────────────────────────────────
 group "ステップ探索とプラグイン性"
@@ -1300,6 +1303,118 @@ step_run() { ok done }'
 out=$(mr)
 assert_not_contains "$out" "⊘ 無効" "disabled: 無効ステップが 0 件なら出力は従来どおり"
 assert_contains "$out" "[1/1] クリーン" "disabled: 無効ステップが 0 件なら総数は変わらない"
+
+# ─────────────────────────────────────────────────────────────────
+group "--jsonl"
+# ─────────────────────────────────────────────────────────────────
+
+# 各行が単独で妥当な JSON であることを確認するヘルパー。
+assert_all_lines_valid_json() {
+  local text=$1 label=$2
+  local bad=0 line=""
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    print -r -- "$line" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1 || bad=1
+  done <<< "$text"
+  if (( bad == 0 )); then pass "$label"
+  else fail "$label" "$text"; fi
+}
+
+# 特定の ev を持つ行だけを 1 行返す（無ければ空）
+jsonl_line() {
+  local text=$1 ev=$2
+  print -r -- "$text" | grep -m1 "\"ev\":\"${ev}\""
+}
+
+newenv
+mkstep 10-ok.sh 'step_name="成功"
+step_run() { print -r -- "1 行目"; print -r -- "2 行目"; add_action a "やること"; emit_summary "2 lines printed" }'
+mkstep 20-fail.sh 'step_name="失敗"
+step_run() { local i=0; for (( i = 1; i <= 25; i++ )); do print -r -- "line ${i}"; done; return 1 }'
+out=$(mr_stdout --jsonl)
+
+assert_all_lines_valid_json "$out" "jsonl: 各行が単独で妥当な JSON である"
+assert_not_contains "$out" "━" "jsonl: 人間向けの装飾を stdout に混ぜない"
+assert_not_contains "$out" "⊘ skip" "jsonl: skip 等の整形出力も stdout に混ぜない"
+
+run_line=$(jsonl_line "$out" run)
+assert_contains "$run_line" '"mode":"all"' "jsonl: run イベントに mode が入る"
+assert_contains "$run_line" '"started_at":"' "jsonl: run イベントに started_at が入る"
+assert_contains "$run_line" '"total":2' "jsonl: run イベントの total が有効ステップ数と一致する"
+
+ok_line=$(print -r -- "$out" | grep '"slug":"ok"')
+assert_contains "$ok_line" '"status":"ok"' "jsonl: 成功ステップの status"
+assert_contains "$ok_line" '"summary":"2 lines printed"' "jsonl: emit_summary の内容が summary に載る"
+assert_contains "$ok_line" '"tail":[]' "jsonl: 成功ステップの tail は空配列"
+
+fail_line=$(print -r -- "$out" | grep '"slug":"fail"')
+assert_contains "$fail_line" '"status":"fail"' "jsonl: 失敗ステップの status"
+assert_contains "$fail_line" '"tail":["line 6"' "jsonl: 失敗ステップの tail は末尾 20 行に切り詰められる"
+assert_contains "$fail_line" '"line 25"]' "jsonl: 失敗ステップの tail に最終行まで含まれる"
+assert_not_contains "$fail_line" '"line 5"' "jsonl: 失敗ステップの tail は先頭側を含まない（20 行より前）"
+
+summary_line=$(jsonl_line "$out" summary)
+assert_contains "$summary_line" '"wall_ms":' "jsonl: summary イベントに wall_ms が入る"
+assert_contains "$summary_line" '"actions":[{"step":1' "jsonl: summary イベントの actions が --json と同じ構造"
+
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { ok A }'
+out=$(mr_stdout --jsonl)
+noemit_line=$(print -r -- "$out" | grep '"slug":"a"')
+assert_contains "$noemit_line" '"summary":""' "jsonl: emit_summary を呼ばなければ summary は空文字"
+
+# 既存の --json は構造を変えていないこと（回帰確認）
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { add_action a "やること" }'
+json_out=$(mr_stdout --json)
+if print -r -- "$json_out" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+  pass "jsonl: --json は従来どおり単独で妥当な JSON を出す"
+else
+  fail "jsonl: --json は従来どおり単独で妥当な JSON を出す" "$json_out"
+fi
+assert_contains "$json_out" '"steps":['   "jsonl: --json は steps 配列を持つ（従来どおり）"
+assert_contains "$json_out" '"streak_days"' "jsonl: --json は streak_days を持つ（従来どおり）"
+assert_not_contains "$json_out" '"ev":' "jsonl: --json には ev フィールドが無い（従来どおり）"
+
+# --json / --jsonl の同時指定
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { : }'
+out=$(mr --json --jsonl)
+assert_contains "$out" "--json と --jsonl は併用できません" "jsonl: --json --jsonl の同時指定はエラーになる"
+assert_eq "$(mr_rc --json --jsonl)" "1" "jsonl: --json --jsonl の同時指定は終了コード 1"
+
+# myroutine last
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { : }'
+out=$(mr last)
+assert_contains "$out" "直近の実行記録がありません" "jsonl: last はファイル不在時にメッセージを出す"
+assert_eq "$(mr_rc last)" "1" "jsonl: last はファイル不在時に rc=1"
+
+mr_stdout --jsonl >/dev/null
+if [[ -f "$MYROUTINE_LOG_DIR/last-events.jsonl" ]]; then
+  pass "jsonl: --jsonl 実行で last-events.jsonl が作られる"
+else
+  fail "jsonl: --jsonl 実行で last-events.jsonl が作られる"
+fi
+last_out=$(mr_stdout last)
+assert_all_lines_valid_json "$last_out" "jsonl: last が返す内容も各行妥当な JSON である"
+assert_contains "$last_out" '"ev":"run"' "jsonl: last の内容に run イベントが含まれる"
+
+# ログファイルへの反映
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { print -r -- "本体の出力"; : }'
+mr_stdout --jsonl >/dev/null
+log_file="$MYROUTINE_LOG_DIR/$(date +%Y-%m-%d).txt"
+if [[ -f $log_file ]] && grep -q "本体の出力" "$log_file"; then
+  pass "jsonl: ステップ本体の生出力がログファイルに残る"
+else
+  fail "jsonl: ステップ本体の生出力がログファイルに残る" "$(cat "$log_file" 2>/dev/null)"
+fi
 
 # ─────────────────────────────────────────────────────────────────
 print -r -- ""

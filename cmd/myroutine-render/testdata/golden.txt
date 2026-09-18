@@ -1,0 +1,32 @@
+  ✓ [1/19] AWS SSO Login                                                                        8.1s
+  ✗ [3/19] Dotfiles 差分チェック＋同期                                                    6.7s  rc=1
+      │ === darwin_own ドリフト検査 ===
+      │   1 件の意図しない差分があります。
+      │ make: *** [diff-check] Error 1
+      └ 全文: /Users/x/ot/rotine-log/2026-09-18.txt
+  ✓ [4/19] Worktree 同期                   24/24 (3 pulled)                                    41.2s
+  ⊘ skip 2 件
+      [5] Brew Update                     weekly（月曜のみ）
+      [9] Progress Report Reminder        前提が足りません
+  ⊘ 無効 1 件
+      [16] claude セッションと MCP プロセスの棚卸し
+          2026-09-17: tmux 経由で claude を開かなくなり、棚卸しの対象が 0 件のため
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  ✗ 要対応 1 件
+
+  ▸ [3] dotfiles の自動同期に失敗 — 手動で myroutine-sync-dotfiles を実行する  NEW 2日連続
+        $ cd ~/MyWorkspace/dotfiles-ubuntu/main && git status
+
+  ⊘ きょう回すもの 1 件
+
+  ▸ [9] /routine.progress-report を回す
+
+  ✓ 情報 1 件（対応不要）
+
+  ▸ [7] レポートなしの退避済みディレクトリ 1 件を自動削除した
+
+  ✓ 解消 1 件: old-id
+════════════════════════════════════════════════════════════════════════════════════════════════════
+  所要 1m13s   全量ログ: /Users/x/ot/rotine-log/2026-09-18.txt
+  再表示: myroutine last

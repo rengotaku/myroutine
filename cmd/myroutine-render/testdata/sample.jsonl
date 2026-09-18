@@ -1,0 +1,9 @@
+{"ev":"run","mode":"all","started_at":"2026-09-18T11:32:49+09:00","total":19,"log":"/Users/x/ot/rotine-log/2026-09-18.txt"}
+{"ev":"step","n":1,"name":"AWS SSO Login","slug":"aws-sso","status":"ok","rc":0,"duration_ms":8100,"summary":"","note":"","tail":[]}
+{"ev":"step","n":3,"name":"Dotfiles 差分チェック＋同期","slug":"dotfiles","status":"fail","rc":1,"duration_ms":6700,"summary":"","note":"","tail":["=== darwin_own ドリフト検査 ===","  1 件の意図しない差分があります。","make: *** [diff-check] Error 1"]}
+{"ev":"step","n":4,"name":"Worktree 同期","slug":"worktree","status":"ok","rc":0,"duration_ms":41200,"summary":"24/24 (3 pulled)","note":"","tail":[]}
+{"ev":"step","n":5,"name":"Brew Update","slug":"brew","status":"skip","rc":0,"duration_ms":0,"summary":"","note":"cadence: weekly（月曜のみ）","tail":[]}
+this is not json, ignore me
+{"ev":"unknown-future-event","foo":"bar"}
+{"ev":"step","n":9,"name":"Progress Report Reminder","slug":"progress-report","status":"skip","rc":0,"duration_ms":0,"summary":"","note":"前提が足りません","tail":[]}
+{"ev":"summary","wall_ms":73000,"actions":[{"step":3,"id":"dotfiles-sync-failed","text":"dotfiles の自動同期に失敗 — 手動で myroutine-sync-dotfiles を実行する\n→ $ cd ~/MyWorkspace/dotfiles-ubuntu/main && git status","streak_days":2,"new":true}],"todos":[{"step":9,"id":"progress-report","text":"/routine.progress-report を回す"}],"infos":[{"step":7,"id":"stale-trashed","text":"レポートなしの退避済みディレクトリ 1 件を自動削除した"}],"resolved":["old-id"],"disabled":[{"n":16,"name":"claude セッションと MCP プロセスの棚卸し","slug":"claude-procs","reason":"2026-09-17: tmux 経由で claude を開かなくなり、棚卸しの対象が 0 件のため"}]}
