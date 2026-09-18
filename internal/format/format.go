@@ -155,7 +155,7 @@ func (s *State) FlushSkips() render.Block {
 	for _, st := range s.pendingSkip {
 		note := strings.TrimPrefix(st.Note, "cadence: ")
 		label := fmt.Sprintf("[%d] %s", st.N, textwidth.Pad(st.Name, nameCol)) + note
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: label, Dim: true})
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: label, Dim: true, Wrap: true})
 		lines = append(lines, render.WrapText(note, 10)...)
 	}
 	s.pendingSkip = nil
@@ -220,9 +220,9 @@ func disabledBlock(items []eventlog.DisabledItem) render.Block {
 		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 無効 %d 件", iconSkip, len(items)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconSkip)},
 	}
 	for _, it := range items {
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: fmt.Sprintf("[%d] %s", it.N, it.Name)})
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: fmt.Sprintf("[%d] %s", it.N, it.Name), Wrap: true})
 		if it.Reason != "" {
-			lines = append(lines, render.Line{Kind: render.KindText, Indent: 10, Text: it.Reason, Dim: true})
+			lines = append(lines, render.Line{Kind: render.KindText, Indent: 10, Text: it.Reason, Dim: true, Wrap: true})
 		}
 	}
 	return render.Block{Lines: lines}
@@ -274,7 +274,7 @@ func actionBlock(actions []eventlog.ActionItem) render.Block {
 			first = first + "  " + strings.Join(tags, " ")
 		}
 		lines = append(lines, render.Line{Kind: render.KindBlank})
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("▸ [%d] %s", a.Step, first)})
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("▸ [%d] %s", a.Step, first), Wrap: true, HangIndent: markerWidth(a.Step)})
 		lines = append(lines, render.WrapText(a.Text, 8)...)
 	}
 	return render.Block{Lines: lines}
@@ -289,7 +289,7 @@ func listBlock(icon, label string, n int, items []item) render.Block {
 	}
 	for _, it := range items {
 		lines = append(lines, render.Line{Kind: render.KindBlank})
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("▸ [%d] %s", it.Step, render.FirstLine(it.Text))})
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("▸ [%d] %s", it.Step, render.FirstLine(it.Text)), Wrap: true, HangIndent: markerWidth(it.Step)})
 		lines = append(lines, render.WrapText(it.Text, 8)...)
 	}
 	return render.Block{Lines: lines}
@@ -318,4 +318,10 @@ func shortenPath(p string) string {
 		return "~" + strings.TrimPrefix(p, home)
 	}
 	return p
+}
+
+// markerWidth は "▸ [3] " のような行頭マーカーの表示幅を返す。折り返しの
+// 継続行をここまで下げると、本文がマーカーの下に潜らず読み始めが揃う。
+func markerWidth(step int) int {
+	return textwidth.Width(fmt.Sprintf("▸ [%d] ", step))
 }

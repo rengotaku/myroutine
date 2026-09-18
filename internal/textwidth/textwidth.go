@@ -91,6 +91,82 @@ func Truncate(s string, w int) string {
 	return b.String() + ellipsis
 }
 
+// WrapWidth は s の表示幅が w を超える場合、末尾を "…" にせず複数行へ折り返す
+// （切り詰めて情報を失う Truncate とは対で使う）。ANSI エスケープシーケンスは
+// 幅 0 として扱い、シーケンス自体は分割しない。空文字を渡すと空文字1件の
+// スライスを返す。w が 1 未満なら 1 として扱う（無限ループ防止）。
+// WrapWidths は WrapWidth と同じ折り返しを、1 行目と継続行で別々の幅に
+// 対して行う。ぶら下げインデントを付ける呼び出し側では継続行の使える幅が
+// 狭くなるため、1 つの幅で割ると継続行だけが指定幅をはみ出す。
+func WrapWidths(s string, first, cont int) []string {
+	if first < 1 {
+		first = 1
+	}
+	if cont < 1 {
+		cont = 1
+	}
+	if s == "" {
+		return []string{""}
+	}
+
+	var lines []string
+	var b strings.Builder
+	width := 0
+	limit := first
+	tokens := splitPreservingANSI(s)
+	for _, tok := range tokens {
+		if tok.isEscape {
+			b.WriteString(tok.text)
+			continue
+		}
+		rw := cond.RuneWidth(tok.r)
+		if width+rw > limit && b.Len() > 0 {
+			lines = append(lines, b.String())
+			b.Reset()
+			width = 0
+			limit = cont
+		}
+		b.WriteRune(tok.r)
+		width += rw
+	}
+	if b.Len() > 0 || len(lines) == 0 {
+		lines = append(lines, b.String())
+	}
+	return lines
+}
+
+func WrapWidth(s string, w int) []string {
+	if w < 1 {
+		w = 1
+	}
+	if s == "" {
+		return []string{""}
+	}
+
+	var lines []string
+	var b strings.Builder
+	width := 0
+	tokens := splitPreservingANSI(s)
+	for _, tok := range tokens {
+		if tok.isEscape {
+			b.WriteString(tok.text)
+			continue
+		}
+		rw := cond.RuneWidth(tok.r)
+		if width+rw > w && b.Len() > 0 {
+			lines = append(lines, b.String())
+			b.Reset()
+			width = 0
+		}
+		b.WriteRune(tok.r)
+		width += rw
+	}
+	if b.Len() > 0 || len(lines) == 0 {
+		lines = append(lines, b.String())
+	}
+	return lines
+}
+
 type token struct {
 	isEscape bool
 	text     string

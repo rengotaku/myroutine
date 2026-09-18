@@ -59,6 +59,17 @@ type Line struct {
 	// （tail 抜粋・全文ログ導線・skip/無効の理由等）。IconLen による着色とは
 	// 排他（Dim を優先する）。
 	Dim bool
+	// Wrap が true で Right=="" のとき、Text が表示幅を超える行は末尾を
+	// 切り詰めず複数行へ折り返す（説明文向け）。継続行は Indent をそのまま
+	// 使うため、1 行目の本文開始位置に自動で揃う。false（既定）の行は
+	// 幅を超えた分を "…" で切り詰める（tail 抜粋・ログパス等、原文の断片が
+	// 意味を持つ行向け）。--width の契約はどちらの経路でも必ず守る。
+	Wrap bool
+	// HangIndent は折り返しの継続行にだけ足す追加インデント。Text が
+	// "▸ [3] " のような行頭マーカーを含む場合、継続行を Indent のまま
+	// 出すとマーカーの下に本文が潜り込んで境目が読めない。マーカーの
+	// 表示幅を入れると、継続行が本文開始位置にぶら下がる。
+	HangIndent int
 }
 
 // Block は見出し（省略可）と Line の並び。
@@ -113,26 +124,69 @@ func Render(w io.Writer, blocks []Block, opt Options) {
 				}
 				fmt.Fprintln(w, strings.Repeat(ch, width/textwidth.Width(ch)))
 			default:
-				fmt.Fprintln(w, renderTextLine(line, width, opt.Color))
+				for _, s := range renderTextLines(line, width, opt.Color) {
+					fmt.Fprintln(w, s)
+				}
 			}
 		}
 	}
 }
 
-func renderTextLine(line Line, width int, color bool) string {
+// renderTextLines は KindText の1つの Line を、実際に出力する物理行（1行
+// または複数行）へ変換する。Right を持つ行は JoinRow が既に幅を守っている
+// ため常に1行。Right を持たない行は、幅を超えた分を Wrap の有無で
+// 折り返すか切り詰めるかに振り分ける（どちらの経路でも幅を超えて出力
+// しない）。
+func renderTextLines(line Line, width int, color bool) []string {
 	prefix := strings.Repeat(" ", line.Indent)
-	text := colorizeText(line, color)
-	left := prefix + text
-	if line.Right == "" {
-		return left
+	if line.Right != "" {
+		left := prefix + colorizeText(line, color)
+		right := line.Right
+		if color {
+			right = ansiDim + right + ansiReset
+		}
+		// JoinRow / textwidth は ANSI エスケープを幅 0 として扱うため、
+		// 着色済みの文字列を渡しても桁揃えは崩れない。
+		return []string{JoinRow(left, right, width)}
 	}
-	right := line.Right
-	if color {
-		right = ansiDim + right + ansiReset
+
+	left := prefix + colorizeText(line, color)
+	if textwidth.Width(left) <= width {
+		return []string{left}
 	}
-	// JoinRow / textwidth は ANSI エスケープを幅 0 として扱うため、着色済みの
-	// 文字列を渡しても桁揃えは崩れない。
-	return JoinRow(left, right, width)
+	if !line.Wrap {
+		return []string{textwidth.Truncate(left, width)}
+	}
+
+	// 折り返しは着色前の Text に対して行う。着色（Dim / アイコン）を先に
+	// 適用してしまうと ANSI エスケープが物理行をまたぎ、端末側で色が
+	// 閉じない・継続行に余計な色が乗る等の崩れが起きるため、行ごとに
+	// 都度着色し直す。
+	// 1 行目と継続行で使える幅が違う（継続行は HangIndent の分だけ狭い）。
+	// 同じ budget で割ると継続行だけ幅をはみ出すため、分けて折り返す。
+	firstBudget := width - line.Indent
+	contBudget := width - line.Indent - line.HangIndent
+	if firstBudget < 1 {
+		firstBudget = 1
+	}
+	if contBudget < 1 {
+		contBudget = 1
+	}
+	chunks := textwidth.WrapWidths(line.Text, firstBudget, contBudget)
+	contPrefix := prefix + strings.Repeat(" ", line.HangIndent)
+	out := make([]string, 0, len(chunks))
+	for i, c := range chunks {
+		sub := line
+		sub.Text = c
+		if i == 0 {
+			out = append(out, prefix+colorizeText(sub, color))
+			continue
+		}
+		// アイコンは1行目の先頭にしか無い。
+		sub.IconLen = 0
+		out = append(out, contPrefix+colorizeText(sub, color))
+	}
+	return out
 }
 
 // colorizeText は line.Text に ANSI コードを埋め込む。着色対象は
@@ -199,7 +253,7 @@ func WrapText(text string, continIndent int) []Line {
 		} else if strings.HasPrefix(t, "$ ") {
 			// 既に "$ " 形式ならそのまま。
 		}
-		lines = append(lines, Line{Kind: KindText, Indent: continIndent, Text: t})
+		lines = append(lines, Line{Kind: KindText, Indent: continIndent, Text: t, Wrap: true})
 	}
 	return lines
 }

@@ -1414,6 +1414,26 @@ off_line=$(print -r -- "$out" | grep '"slug":"off"')
 assert_contains "$off_line" '"status":"disabled"' "jsonl: 無効ステップの status は disabled"
 assert_not_contains "$off_line" '"pos"' "jsonl: disabled ステップには pos を振らない（total の分母に含まれないため）"
 
+# 並列グループの後方が skip でも、先頭（実行するステップ）の pos は 1 になる。
+# ゲート判定は group 内を並び順で先に全部済ませるため、skip は自分のゲートで
+# 即座にイベントを発行する一方、実行するステップは実行完了後にまとめて発行
+# される。発行順（gate 判定順）で pos を振ると、seq 上は後ろの skip が先に
+# pos:1 を取ってしまい、先頭の実行ステップが pos:2 になる（今回の指摘）。
+newenv
+mkstep 10-prun.sh 'step_name="走る方"
+step_parallel=true
+step_run() { ok ran }'
+mkstep 20-pskip.sh 'step_name="前提なし"
+step_parallel=true
+step_requires=(mr-no-such-command-xyz)
+step_run() { ok never }'
+out=$(mr_stdout --jsonl)
+run_step_line=$(print -r -- "$out" | grep '"slug":"prun"')
+skip_line=$(print -r -- "$out" | grep '"slug":"pskip"')
+assert_contains "$skip_line" '"status":"skip"' "jsonl: 並列グループ後方の前提不足は skip になる"
+assert_contains "$run_step_line" '"pos":1' "jsonl: 並列グループの先頭（実行するステップ）の pos は 1 (発行順の加算ではなく seq 上の位置)"
+assert_contains "$skip_line" '"pos":2' "jsonl: 並列グループの後方（skip）の pos は 2 (seq 上の位置どおり)"
+
 newenv
 mkstep 10-a.sh 'step_name="A"
 step_run() { ok A }'
