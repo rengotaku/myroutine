@@ -10,7 +10,8 @@
 # Options:
 #   -n, --dry-run     副作用を実行せず、実行予定を表示する
 #   -y, --yes         確認プロンプトを自動承認する
-#       --json        結果を機械可読な JSON で出力する
+#       --json        結果を機械可読な JSON で出力する（実行終了後に 1 個）
+#       --jsonl       ステップ完了ごとに 1 行の JSON イベントを出力する（--json とは併用不可）
 #       --timeout N   ステップの既定タイムアウト秒 (0 で無制限)
 #       --no-lock     多重起動ロックを取らない (テスト用)
 #       --force-cadence  step_cadence の間隔判定を無視して実行する
@@ -69,6 +70,8 @@
 #   capture [-d 既定値] VAR cmd...        コマンド失敗を検知できる形で出力を受け取る
 #   confirm "<問い>"                      確認プロンプト (tty 不在なら中止側へ倒れる)
 #   run cmd...                            副作用の実行 (dry-run では実行しない)
+#   emit_summary "<1行要約>"              --jsonl の step イベントに載る成功時の要約
+#                                         （宣言しなければ空文字。--json には出ない）
 #
 # add_action と add_todo の使い分け:
 #   add_action は「本来は無いはずのものが出ている」= 劣化。放置されると連続日数が
@@ -106,9 +109,18 @@ setopt pipefail
 : ${MYROUTINE_STREAK_WARN:=3}
 : ${MYROUTINE_PARALLEL_MAX:=4}
 
-typeset -g _MR_DRY_RUN=0 _MR_YES=0 _MR_JSON=0 _MR_NO_LOCK=0 _MR_FORCE_CADENCE=0
-# JSON の出力先。--json では進捗を stderr へ逃がし、素の stdout を fd 5 に退避する。
+typeset -g _MR_DRY_RUN=0 _MR_YES=0 _MR_JSON=0 _MR_JSONL=0 _MR_NO_LOCK=0 _MR_FORCE_CADENCE=0
+# JSON の出力先。--json / --jsonl では進捗を stderr へ逃がし、素の stdout を fd 5 に退避する。
 typeset -g _MR_JSON_FD=1
+# --jsonl 専用。当日ログファイルのパスと、myroutine last が読み直すイベントファイル。
+typeset -g _MR_JSONL_LOG="" _MR_JSONL_EVENTS_FILE=""
+# --jsonl 専用。今回の実行対象（seq）のうち無効化されていないステップに、
+# 実行順ではなく「選択されたシーケンス上の位置」を事前に割り当てたもの
+# （n → pos）。並列グループはゲート判定を全ステップ分先に済ませてから実行結果を
+# 確定するため、発行順（イベントが _mr_jsonl_emit_step を通る順）で pos を
+# 振ると skip イベントが先に出て番号が実行順とずれる。run イベントの total と
+# 分母を揃えるため、disabled は含めない（ステップ固有番号 n とは別物）。
+typeset -gA _MR_JSONL_POS_OF=()
 typeset -g _MR_LOCK_DIR="" _MR_TMPDIR=""
 # 実行全体の開始時刻。並列があるとステップ別の合計は実時間と一致しない。
 typeset -g _MR_RUN_T0=0
@@ -118,7 +130,7 @@ typeset -g _MR_RUN_T0=0
 # ─────────────────────────────────────────────────────────────────
 
 _mr_usage() {
-  print -r -- "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json] [--timeout N] [--no-lock] [--force-cadence] [ls | <ステップ番号: 1,3,5>]"
+  print -r -- "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json|--jsonl] [--timeout N] [--no-lock] [--force-cadence] [ls | last | <ステップ番号: 1,3,5>]"
 }
 
 typeset -ga _mr_argv=()
@@ -127,6 +139,7 @@ while (( $# > 0 )); do
     -n|--dry-run) _MR_DRY_RUN=1; shift ;;
     -y|--yes)     _MR_YES=1; shift ;;
     --json)       _MR_JSON=1; shift ;;
+    --jsonl)      _MR_JSONL=1; shift ;;
     --no-lock)    _MR_NO_LOCK=1; shift ;;
     --force-cadence) _MR_FORCE_CADENCE=1; shift ;;
     --timeout)
@@ -145,8 +158,14 @@ while (( $# > 0 )); do
   esac
 done
 
+# --json と --jsonl は出力形式が根本的に違う（1 個 vs 逐次）ため併用できない
+if (( _MR_JSON && _MR_JSONL )); then
+  print -ru2 -- "ERROR: --json と --jsonl は併用できません"
+  exit 1
+fi
+
 # JSON 出力時は人間向けの装飾を stdout に混ぜない
-if (( _MR_JSON )); then NO_COLOR=1; fi
+if (( _MR_JSON || _MR_JSONL )); then NO_COLOR=1; fi
 
 # --- 配色 ---
 if [[ -z ${NO_COLOR:-} ]]; then
@@ -202,6 +221,8 @@ _mr_unescape() {
 add_action() { _mr_emit A "$1" "$2" }
 add_todo()   { _mr_emit T "$1" "$2" }
 add_info()   { _mr_emit I "$1" "$2" }
+# --jsonl の step イベントに載る 1 行要約。id は固定でよい（連続日数の追跡対象ではない）。
+emit_summary() { _mr_emit S summary "$1" }
 
 # 判定に使う値を fail-open で取らせないための唯一の入口。
 #   local x=$(cmd) は代入の終了ステータスが local のものになり、cmd の失敗を
@@ -294,6 +315,8 @@ typeset -ga _mr_enabled_pos=()
 typeset -g _MR_ENABLED_TOTAL=0
 typeset -ga _mr_step_cadence=() _mr_step_weekday=()
 typeset -ga _mr_result_status=() _mr_result_rc=() _mr_result_ms=() _mr_result_note=()
+# --jsonl 専用。summary は emit_summary の宣言、tail は失敗ステップの出力末尾。
+typeset -ga _mr_result_summary=() _mr_result_tail=()
 # 実際に実行して要対応の有無を評価できたステップの slug。
 # skip したステップの要対応は「今回出なかった」のではなく「見ていない」ので、
 # 解消判定と連続日数から除外する必要がある。
@@ -709,6 +732,7 @@ _mr_drain() {
       A) _mr_actions+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
       T) _mr_todos+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
       I) _mr_infos+=("${num}"$'\t'"${a}"$'\t'"$(_mr_unescape "$b")") ;;
+      S) _mr_result_summary[$num]="$(_mr_unescape "$b")" ;;
       V)
         if (( a == 0 && b != 0 )); then
           err "step_run は成功したが step_verify が失敗した (検証を優先して失敗扱い)"
@@ -747,6 +771,9 @@ _mr_record() {
     # dry-run は実際には実行していないので、次回の間隔判定を進めてはいけない。
     (( _MR_DRY_RUN )) || _mr_stamp_write "${_mr_step_slugs[$1]}"
   fi
+  # ここが全ステップの結果を記録する唯一の出口なので、--jsonl の step イベントも
+  # ここから出す（skip/fail/disabled を含め、記録経路を増やさない）。
+  (( _MR_JSONL )) && _mr_jsonl_emit_step "$1"
 }
 
 # 実行前のふるい。前提・実行間隔・破壊的ステップのゲートを 1 か所に集める。
@@ -804,6 +831,23 @@ _mr_step_finalize() {
   local chan="$_MR_TMPDIR/chan.$n"
   _mr_drain "$chan"
 
+  # --jsonl はステップ本体の生出力を stdout に出さない代わりに、当日ログへは
+  # 従来どおり残し、失敗時だけ末尾 20 行を tail として JSON に載せる。
+  if (( _MR_JSONL )); then
+    local outfile="$_MR_TMPDIR/out.$n"
+    if [[ -n $_MR_JSONL_LOG && -f $outfile ]]; then
+      {
+        print -r -- ""
+        print -r -- "── [$n] ${name} ──"
+        cat -- "$outfile"
+      } >> "$_MR_JSONL_LOG" 2>/dev/null
+    fi
+    # 成功したステップの出力は保持しない（メモリと JSON サイズの無駄なため）。
+    if (( rc != 0 )) && [[ -f $outfile ]]; then
+      _mr_result_tail[$n]=$(tail -n 20 -- "$outfile")
+    fi
+  fi
+
   if (( rc == 0 )); then
     _mr_record "$n" ok 0 "$ms" ""
     return 0
@@ -859,7 +903,15 @@ _mr_run_step() {
   local limit=$(_mr_step_timeout_of "$file")
   local t0=$(_mr_now_ms)
   local rc=0
-  _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" || rc=$?
+  if (( _MR_JSONL )); then
+    # 並列グループ (_mr_exec_parallel) と同じ out.$n に捕獲し、_mr_step_finalize
+    # 側の tail 抽出・ログ追記を逐次・並列で共通化する。
+    local outfile="$_MR_TMPDIR/out.$n"
+    : > "$outfile"
+    { _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" } >>"$outfile" 2>&1 || rc=$?
+  else
+    _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" || rc=$?
+  fi
   local ms=$(( $(_mr_now_ms) - t0 ))
   _mr_last_step_rc=$rc
 
@@ -1276,9 +1328,11 @@ _mr_json_escape() {
   print -r -- "$s"
 }
 
-_mr_summary_json() {
-  local out="{" n=0 first=1
-  out+="\"steps\":["
+# --json と --jsonl summary イベントの両方が使う配列組み立て。1 関数 1 配列にして
+# あるのは、jsonl 側では steps 配列を持たない（既に step イベントで流れている）
+# ため、--json 用の全体 JSON とは組み合わせが変わるから。
+_mr_json_steps_array() {
+  local out="[" n=0 first=1
   for (( n = 1; n <= ${#_mr_step_files}; n++ )); do
     [[ -n ${_mr_result_status[$n]:-} ]] || continue
     (( first )) || out+=","
@@ -1291,9 +1345,12 @@ _mr_summary_json() {
     out+=",\"duration_ms\":${_mr_result_ms[$n]:-0}"
     out+=",\"note\":\"$(_mr_json_escape "${_mr_result_note[$n]:-}")\"}"
   done
-  out+="],\"actions\":["
-  first=1
-  local a=""
+  out+="]"
+  print -r -- "$out"
+}
+
+_mr_json_actions_array() {
+  local out="[" first=1 a=""
   for a in "${_mr_actions[@]}"; do
     local -a p=("${(@s:	:)a}")
     (( first )) || out+=","
@@ -1304,34 +1361,47 @@ _mr_summary_json() {
     out+=",\"text\":\"$(_mr_json_escape "${p[3]}")\""
     out+=",\"streak_days\":${_mr_streak[${p[2]}]:-1},\"new\":${isnew}}"
   done
-  out+="],\"todos\":["
-  first=1
-  local t=""
+  out+="]"
+  print -r -- "$out"
+}
+
+_mr_json_todos_array() {
+  local out="[" first=1 t=""
   for t in "${_mr_todos[@]}"; do
     local -a q=("${(@s:	:)t}")
     (( first )) || out+=","
     first=0
     out+="{\"step\":${q[1]},\"id\":\"$(_mr_json_escape "${q[2]}")\",\"text\":\"$(_mr_json_escape "${q[3]}")\"}"
   done
-  out+="],\"infos\":["
-  first=1
-  local i=""
+  out+="]"
+  print -r -- "$out"
+}
+
+_mr_json_infos_array() {
+  local out="[" first=1 i=""
   for i in "${_mr_infos[@]}"; do
     local -a p=("${(@s:	:)i}")
     (( first )) || out+=","
     first=0
     out+="{\"step\":${p[1]},\"id\":\"$(_mr_json_escape "${p[2]}")\",\"text\":\"$(_mr_json_escape "${p[3]}")\"}"
   done
-  out+="],\"resolved\":["
-  first=1
+  out+="]"
+  print -r -- "$out"
+}
+
+_mr_json_resolved_array() {
+  local out="[" first=1 i=""
   for i in $_mr_resolved_ids; do
     (( first )) || out+=","
     first=0
     out+="\"$(_mr_json_escape "$i")\""
   done
-  out+="],\"disabled\":["
-  first=1
-  local dn=0
+  out+="]"
+  print -r -- "$out"
+}
+
+_mr_json_disabled_array() {
+  local out="[" first=1 dn=0
   for (( dn = 1; dn <= ${#_mr_step_files}; dn++ )); do
     [[ -n ${_mr_step_disabled[$dn]:-} ]] || continue
     (( first )) || out+=","
@@ -1341,14 +1411,113 @@ _mr_summary_json() {
     out+=",\"slug\":\"$(_mr_json_escape "${_mr_step_slugs[$dn]}")\""
     out+=",\"reason\":\"$(_mr_json_escape "${_mr_step_disabled[$dn]}")\"}"
   done
-  out+="]}"
+  out+="]"
+  print -r -- "$out"
+}
+
+_mr_summary_json() {
+  local out="{"
+  out+="\"steps\":$(_mr_json_steps_array)"
+  out+=",\"actions\":$(_mr_json_actions_array)"
+  out+=",\"todos\":$(_mr_json_todos_array)"
+  out+=",\"infos\":$(_mr_json_infos_array)"
+  out+=",\"resolved\":$(_mr_json_resolved_array)"
+  out+=",\"disabled\":$(_mr_json_disabled_array)"
+  out+="}"
   print -r -- "$out" >&$_MR_JSON_FD
+}
+
+# ─────────────────────────────────────────────────────────────────
+# --jsonl イベント出力
+# ─────────────────────────────────────────────────────────────────
+#
+# run（開始直後）→ step（ステップ完了ごと）→ summary（最後）の順で 1 行ずつ流す。
+# 受け手はパイプの向こうで逐次描画する前提なので、行ごとに完結した JSON にし、
+# 都度 flush する（zsh は 1 コマンドの実行完了時に stdout を flush するため、
+# print を分けて呼ぶだけで実現できる。バッファリング目的で連結しないこと）。
+
+# %z の "+0900" 形式を ISO8601 の "+09:00" に変換する
+_mr_iso8601_now() {
+  local now=$(_mr_now_epoch) s=""
+  strftime -s s '%Y-%m-%dT%H:%M:%S%z' "$now"
+  local tz=${s[-5,-1]} body=${s[1,-6]}
+  print -r -- "${body}${tz[1,3]}:${tz[4,5]}"
+}
+
+# stdout（fd $_MR_JSON_FD）へ出しつつ、myroutine last 用のイベントファイルへも
+# 同じ行を残す。
+_mr_jsonl_write() {
+  print -r -- "$1" >&$_MR_JSON_FD
+  [[ -n $_MR_JSONL_EVENTS_FILE ]] && print -r -- "$1" >> "$_MR_JSONL_EVENTS_FILE"
+}
+
+_mr_jsonl_emit_run() {
+  local mode=$1 total=$2
+  local out="{\"ev\":\"run\""
+  out+=",\"mode\":\"$(_mr_json_escape "$mode")\""
+  out+=",\"started_at\":\"$(_mr_iso8601_now)\""
+  out+=",\"total\":${total}"
+  out+=",\"log\":\"$(_mr_json_escape "$_MR_JSONL_LOG")\"}"
+  _mr_jsonl_write "$out"
+}
+
+_mr_json_tail_array() {
+  local n=$1 out="[" first=1 l=""
+  if [[ -n ${_mr_result_tail[$n]:-} ]]; then
+    local -a lines=("${(@f)_mr_result_tail[$n]}")
+    for l in $lines; do
+      (( first )) || out+=","
+      first=0
+      out+="\"$(_mr_json_escape "$l")\""
+    done
+  fi
+  out+="]"
+  print -r -- "$out"
+}
+
+_mr_jsonl_emit_step() {
+  local n=$1
+  local st_status=${_mr_result_status[$n]}
+  local out="{\"ev\":\"step\""
+  out+=",\"n\":${n}"
+  out+=",\"name\":\"$(_mr_json_escape "${_mr_step_names[$n]}")\""
+  out+=",\"slug\":\"$(_mr_json_escape "${_mr_step_slugs[$n]}")\""
+  out+=",\"status\":\"${st_status}\""
+  out+=",\"rc\":${_mr_result_rc[$n]:-0}"
+  out+=",\"duration_ms\":${_mr_result_ms[$n]:-0}"
+  out+=",\"summary\":\"$(_mr_json_escape "${_mr_result_summary[$n]:-}")\""
+  out+=",\"note\":\"$(_mr_json_escape "${_mr_result_note[$n]:-}")\""
+  out+=",\"tail\":$(_mr_json_tail_array "$n")"
+  # pos は run イベントの total と同じ集合（今回実行した無効化されていない
+  # ステップ）で数えた通し番号。n（ステップ固有番号、要対応との対応付けに使う）
+  # とは分母が異なるため別フィールドにする。disabled は total に含まれないので
+  # pos を振らない。_MR_JSONL_POS_OF は実行前に確定済みの位置（発行順ではない）。
+  if [[ -n ${_MR_JSONL_POS_OF[$n]:-} ]]; then
+    out+=",\"pos\":${_MR_JSONL_POS_OF[$n]}"
+  fi
+  out+="}"
+  _mr_jsonl_write "$out"
+}
+
+_mr_jsonl_emit_summary() {
+  local wall_ms=$(( $(_mr_now_ms) - _MR_RUN_T0 ))
+  local out="{\"ev\":\"summary\""
+  out+=",\"wall_ms\":${wall_ms}"
+  out+=",\"actions\":$(_mr_json_actions_array)"
+  out+=",\"todos\":$(_mr_json_todos_array)"
+  out+=",\"infos\":$(_mr_json_infos_array)"
+  out+=",\"resolved\":$(_mr_json_resolved_array)"
+  out+=",\"disabled\":$(_mr_json_disabled_array)"
+  out+="}"
+  _mr_jsonl_write "$out"
 }
 
 _mr_finish() {
   _mr_analyze_history
   if (( _MR_JSON )); then
     _mr_summary_json
+  elif (( _MR_JSONL )); then
+    _mr_jsonl_emit_summary
   else
     _mr_summary_human
   fi
@@ -1422,6 +1591,38 @@ _mr_parse_steps() {
 # その間に届いた TERM / INT は子へ伝わらず、中断したはずの後続ステップが
 # そのまま実行されてしまう。background + wait なら wait が割り込まれて
 # trap が即座に走る。終了コードはパイプラインを跨げないのでファイルで返す。
+# --jsonl 実行の入口。--json（実行後にまとめて 1 個吐く）と違い、進捗は
+# run/step/summary の 3 種イベントを都度流す。stdout は JSONL 専用にするため
+# _mr_with_log のような tee は使わず、既存の --json と同じ fd1→stderr の
+# 付け替えで人間向け出力を逃がす。ステップ本体の生出力は当日ログへ別途残す
+# （_mr_step_finalize 側で捕獲・追記する）。
+_mr_run_all_jsonl() {
+  local label=$1; shift
+  local -a seq=("$@")
+  exec 5>&1 1>&2
+  _MR_JSON_FD=5
+  _MR_JSONL_LOG="$MYROUTINE_LOG_DIR/$(date +%Y-%m-%d).txt"
+  _MR_JSONL_EVENTS_FILE="$MYROUTINE_LOG_DIR/last-events.jsonl"
+  # 前回実行のイベントを引きずらないよう、実行のたびに作り直す。
+  : > "$_MR_JSONL_EVENTS_FILE"
+  print -r -- "=== myroutine ${label} $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$_MR_JSONL_LOG"
+
+  local mode="partial"
+  (( _MR_FULL_RUN )) && mode="all"
+  local total=0 n=""
+  _MR_JSONL_POS_OF=()
+  for n in $seq; do
+    [[ -n ${_mr_step_disabled[$n]:-} ]] && continue
+    (( total++ ))
+    _MR_JSONL_POS_OF[$n]=$total
+  done
+  _mr_jsonl_emit_run "$mode" "$total"
+
+  local r=0
+  _mr_run_sequence "${seq[@]}" || r=$?
+  return $r
+}
+
 _mr_with_log() {
   local label=$1; shift
   local -a seq=("$@")
@@ -1472,6 +1673,16 @@ case ${_mr_argv[1]:-} in
     _mr_discover || exit 1
     _mr_show_list
     ;;
+  last)
+    # 直近の --jsonl 実行を再生するだけ。描画は Go 側の役割なのでここでは
+    # ファイルの中身をそのまま流す（パイプで繋げる形を想定）。
+    _mr_last_events="$MYROUTINE_LOG_DIR/last-events.jsonl"
+    if [[ ! -f $_mr_last_events ]]; then
+      print -ru2 -- "直近の実行記録がありません"
+      exit 1
+    fi
+    cat -- "$_mr_last_events"
+    ;;
   "")
     _mr_discover || exit 1
     _mr_acquire_lock || exit 1
@@ -1480,6 +1691,8 @@ case ${_mr_argv[1]:-} in
       exec 5>&1 1>&2
       _MR_JSON_FD=5
       _mr_run_sequence {1..${#_mr_step_files}}
+    elif (( _MR_JSONL )); then
+      _mr_run_all_jsonl "all" {1..${#_mr_step_files}}
     else
       _mr_with_log "all" {1..${#_mr_step_files}}
     fi
@@ -1492,6 +1705,8 @@ case ${_mr_argv[1]:-} in
       exec 5>&1 1>&2
       _MR_JSON_FD=5
       _mr_run_sequence ${(z)_mr_spec}
+    elif (( _MR_JSONL )); then
+      _mr_run_all_jsonl "${(j:,:)${(z)_mr_spec}}" ${(z)_mr_spec}
     else
       _mr_with_log "${(j:,:)${(z)_mr_spec}}" ${(z)_mr_spec}
     fi

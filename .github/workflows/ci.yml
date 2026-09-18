@@ -20,5 +20,12 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zsh
 
+      # macOS ランナーには Go が入っていない（Ubuntu には既定で入っている）。
+      # 版は go.mod を正典にして、ここに重ねて書かない。
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: make ci
         run: make ci

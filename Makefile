@@ -3,11 +3,13 @@
 # ディレクトリを実行しようとして失敗する。衝突しない名前にする。
 ZSH_BIN ?= zsh
 
-.PHONY: help ci test syntax
+.PHONY: help ci test syntax build go-test
 
 help:
 	@echo "make test    — テストを実行する"
 	@echo "make syntax  — 本体とサンプルステップの構文チェック"
+	@echo "make go-test — Go 側（cmd/myroutine-render）のテストを実行する"
+	@echo "make build   — myroutine-render バイナリをビルドする"
 	@echo "make ci      — CI と同じ検証を全部走らせる"
 
 test:
@@ -26,5 +28,13 @@ syntax:
 	done
 	@$(ZSH_BIN) -n tests/myroutine.test.zsh && echo "ok: tests/myroutine.test.zsh"
 
-ci: syntax test
+build:
+	@echo "=== build ==="
+	go build -o bin/myroutine-render ./cmd/myroutine-render
+
+go-test:
+	@echo "=== go-test ==="
+	go test ./...
+
+ci: syntax test go-test
 	@echo "=== ci passed ==="
