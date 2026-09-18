@@ -1,6 +1,9 @@
 package textwidth
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestPadFullWidth(t *testing.T) {
 	got := Pad("ネット疎通確認", 20)
@@ -95,4 +98,19 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// 切り詰めた位置より後ろに閉じの reset があると一緒に捨ててしまい、以降の行まで
+// 着色が残る。失敗ステップの tail 抜粋は色付きで来るので実際に起きる。
+func TestTruncateClosesOpenStyle(t *testing.T) {
+	const reset = "\x1b[0m"
+	s := "\x1b[31m" + strings.Repeat("あ", 20) + reset
+	got := Truncate(s, 10)
+
+	if Width(got) > 10 {
+		t.Errorf("表示幅が超えた: %d (%q)", Width(got), got)
+	}
+	if !strings.Contains(got, reset) {
+		t.Errorf("着色が閉じられていない: %q", got)
+	}
 }

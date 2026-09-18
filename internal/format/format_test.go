@@ -150,3 +150,27 @@ func TestStepPosFallsBackToNWhenAbsent(t *testing.T) {
 		t.Fatalf("pos が無いときは n にフォールバックすべき。got:\n%s", got)
 	}
 }
+
+// 名前が名前列より長いと Pad が詰める分を持たず、要約とくっついて語の境目が
+// 消える（「…棚卸しreview 0」）。名前を切り詰めて空白を必ず残すこと。
+func TestLongNameKeepsGapBeforeSummary(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 1, Log: "/tmp/x.txt"})
+	block := st.Step(eventlog.StepEvent{
+		N: 1, Pos: 1,
+		Name:       "外部出力ガード advisory の棚卸し",
+		Status:     "ok",
+		DurationMs: 1000,
+		Summary:    "review 0 / code-ratio 0",
+	})
+	if len(block.Lines) == 0 {
+		t.Fatalf("行が無い")
+	}
+	got := block.Lines[0].Text
+	if strings.Contains(got, "棚卸しreview") {
+		t.Errorf("名前と要約がくっついている: %q", got)
+	}
+	if !strings.Contains(got, " review 0 / code-ratio 0") {
+		t.Errorf("要約の前に空白が無い: %q", got)
+	}
+}
