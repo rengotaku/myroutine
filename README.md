@@ -47,6 +47,14 @@ ln -s "$PWD/myroutine/bin/myroutine" ~/bin/myroutine   # PATH の通った場所
 mkdir -p ~/.config/myroutine/steps.d
 ```
 
+出力を整形する `myroutine-render` は別バイナリです。`--jsonl` をこれに繋ぐと、成功したステップが 1 行に畳まれ、skip がまとめて出ます（繋がなければ従来どおりの出力です）。
+
+```sh
+make install                 # 既定は ~/.local/bin
+PREFIX=/opt/bin make install # 配置先を変える場合
+myroutine --jsonl | myroutine-render
+```
+
 ステップは同梱していません。`examples/steps.d/` を参考に自分で書きます。
 
 ```sh

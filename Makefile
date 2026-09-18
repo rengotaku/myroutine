@@ -10,6 +10,7 @@ help:
 	@echo "make syntax  — 本体とサンプルステップの構文チェック"
 	@echo "make go-test — Go 側（cmd/myroutine-render）のテストを実行する"
 	@echo "make build   — myroutine-render バイナリをビルドする"
+	@echo "make install — myroutine-render を PREFIX (既定 ~/.local/bin) へ入れる"
 	@echo "make ci      — CI と同じ検証を全部走らせる"
 
 test:
@@ -31,6 +32,18 @@ syntax:
 build:
 	@echo "=== build ==="
 	go build -o bin/myroutine-render ./cmd/myroutine-render
+
+# バイナリは .gitignore 対象なので、使う側は PATH の通った場所へ入れる。
+# 直接 go build -o "$(PREFIX)/..." せずビルドしてから mv するのは、失敗した
+# ビルドで配置済みのバイナリを壊さないため（mv は同一 FS ならアトミック）。
+PREFIX ?= $(HOME)/.local/bin
+
+.PHONY: install
+install: build
+	@echo "=== install ==="
+	@mkdir -p "$(PREFIX)"
+	@mv bin/myroutine-render "$(PREFIX)/myroutine-render"
+	@echo "installed: $(PREFIX)/myroutine-render"
 
 go-test:
 	@echo "=== go-test ==="
