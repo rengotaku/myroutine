@@ -949,7 +949,11 @@ _mr_run_step() {
       # -s でポーリング間隔を縮められるのは GNU だけで、BSD は同名の
       # オプションを持たずエラーで即死する（出力が丸ごと消える）。
       # 付けられるかどうかを実際に試してから決める。
-      local -a tail_opts=(-n 0 -f)
+      # -n 0 はファイルを開いた時点の末尾から追随する。ステップが即座に
+      # 認証コードを出してから待つ場合、tail が開く前に書かれた行を永久に
+      # 取りこぼす（下の待ち時間でも回収できない）。outfile は各ステップで
+      # 作り直すので、先頭から追随して差し支えない。
+      local -a tail_opts=(-n +1 -f)
       if tail -s 0.1 -n 0 /dev/null >/dev/null 2>&1; then
         tail_opts+=(-s 0.1)
       fi
@@ -1511,7 +1515,16 @@ _mr_iso8601_now() {
 # そのため --jsonl の間は SIGPIPE を無視し、write の失敗を戻り値で受けて
 # 通常のコードパスで打ち切る。
 _mr_jsonl_write() {
-  if ! print -r -- "$1" >&$_MR_JSON_FD 2>/dev/null; then
+  # 無視するのは書き込みの間だけにする。--jsonl の実行中ずっと SIG_IGN に
+  # しておくと、ignore は fork/exec を越えて継承されるため、ステップが呼ぶ
+  # 外部コマンドまで SIGPIPE で終われなくなる（閉じたパイプへ書いても死なず
+  # タイムアウトするなど、通常実行と挙動が変わる）。ハンドラを設定した状態は
+  # 子には SIG_DFL として渡るので、書き終えたら元へ戻す。
+  local __rc=0
+  trap '' PIPE
+  print -r -- "$1" >&$_MR_JSON_FD 2>/dev/null || __rc=$?
+  trap '_mr_on_signal 141' PIPE
+  if (( __rc != 0 )); then
     _mr_jsonl_reader_gone
     return 1
   fi
@@ -1679,9 +1692,6 @@ _mr_parse_steps() {
 _mr_run_all_jsonl() {
   local label=$1; shift
   local -a seq=("$@")
-  # SIGPIPE をハンドラで受けると waitjobs で止まる（_mr_jsonl_write のコメント
-  # 参照）。無視して write の戻り値で判断する。
-  trap '' PIPE
   exec 5>&1 1>&2
   _MR_JSON_FD=5
   _MR_JSONL_LOG="$MYROUTINE_LOG_DIR/$(date +%Y-%m-%d).txt"

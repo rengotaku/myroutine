@@ -1545,14 +1545,6 @@ assert_contains "$fail_line" '"tail":["line 6"' "interactive: 失敗時の tail 
 assert_contains "$fail_line" '"line 25"]' "interactive: 失敗時の tail に最終行まで含まれる"
 
 # ─────────────────────────────────────────────────────────────────
-print -r -- ""
-print -r -- "════════════════════════════════════"
-if (( FAIL == 0 )); then
-  print -r -- "  すべて成功 (${PASS} 件)"
-else
-  print -ru2 -- "  失敗 ${FAIL} 件 / 成功 ${PASS} 件"
-fi
-# ─────────────────────────────────────────────────────────────────
 group "--jsonl とパイプの読み手"
 # ─────────────────────────────────────────────────────────────────
 
@@ -1585,5 +1577,13 @@ wait $_pipe_pid 2>/dev/null
 _out=$("$MR" --no-lock --jsonl </dev/null 2>/dev/null | cat)
 assert_eq "$(print -r -- "$_out" | grep -c '"ev"')" "3" "jsonl: 読み手が生きていれば run/step/summary が揃う"
 
+# ─────────────────────────────────────────────────────────────────
+print -r -- ""
+print -r -- "════════════════════════════════════"
+if (( FAIL == 0 )); then
+  print -r -- "  すべて成功 (${PASS} 件)"
+else
+  print -ru2 -- "  失敗 ${FAIL} 件 / 成功 ${PASS} 件"
+fi
 print -r -- "════════════════════════════════════"
 exit $(( FAIL > 0 ))
