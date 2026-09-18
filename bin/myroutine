@@ -36,6 +36,13 @@
 #                                  #   ステップを 1 グループとして同時に実行する。
 #                                  #   step_destructive / step_abort_on_fail とは
 #                                  #   併用できない（確認と中断が成立しないため）
+#   step_interactive=true          # 任意 (既定 false)。実行中の出力を人が見る必要が
+#                                  #   あるステップに宣言する。--jsonl 実行中でも
+#                                  #   生出力を stderr へそのまま流す（stdout の
+#                                  #   JSONL は汚さない）。ログファイルへの書き出しは
+#                                  #   宣言の有無にかかわらず従来どおり行う。
+#                                  #   step_parallel とは併用できない（複数ステップの
+#                                  #   出力が混ざって読めなくなるため）
 #   step_requires=(brew git)       # 任意。無いコマンドがあれば失敗ではなく skip
 #   step_requires_path=(~/foo)     # 任意。無いパスがあれば失敗ではなく skip
 #   step_timeout=300               # 任意。0 で無制限。既定は --timeout / 600 秒
@@ -114,6 +121,10 @@ typeset -g _MR_DRY_RUN=0 _MR_YES=0 _MR_JSON=0 _MR_JSONL=0 _MR_NO_LOCK=0 _MR_FORC
 typeset -g _MR_JSON_FD=1
 # --jsonl 専用。当日ログファイルのパスと、myroutine last が読み直すイベントファイル。
 typeset -g _MR_JSONL_LOG="" _MR_JSONL_EVENTS_FILE=""
+# 読み手が消えたあと二重に畳まないための印。
+typeset -g _MR_JSONL_BROKEN=0
+# 対話ステップの出力を stderr へ追随させる tail の PID（cleanup で落とす）。
+typeset -g _MR_TAIL_PID=""
 # --jsonl 専用。今回の実行対象（seq）のうち無効化されていないステップに、
 # 実行順ではなく「選択されたシーケンス上の位置」を事前に割り当てたもの
 # （n → pos）。並列グループはゲート判定を全ステップ分先に済ませてから実行結果を
@@ -310,6 +321,7 @@ typeset -ga _mr_actions=() _mr_todos=() _mr_infos=()   # "num\tid\ttext"
 typeset -ga _mr_step_files=() _mr_step_names=() _mr_step_slugs=()
 typeset -ga _mr_step_critical=() _mr_step_abort=() _mr_step_destructive=()
 typeset -ga _mr_step_parallel=()
+typeset -ga _mr_step_interactive=()
 typeset -ga _mr_step_disabled=()
 typeset -ga _mr_enabled_pos=()
 typeset -g _MR_ENABLED_TOTAL=0
@@ -443,6 +455,7 @@ _mr_read_meta() {
     step_cadence=""
     step_cadence_weekday=""
     step_parallel=false
+    step_interactive=false
     step_disabled=""
     source "$file" || exit 10
     [[ -n $step_name ]] || exit 11
@@ -460,7 +473,12 @@ _mr_read_meta() {
     case ${(L)step_disabled} in
       true|false) exit 15 ;;
     esac
-    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}"$'\t'"${step_destructive}"$'\t'"${step_cadence:-daily}"$'\t'"${step_cadence_weekday}"$'\t'"${step_parallel}"$'\t'"${step_disabled}" >&4
+    # step_interactive は実行中の出力を人に見せる前提のため、並列で他ステップと
+    # 混ざると読めなくなる。走らせてみるまで分からない状態にせず宣言の時点で弾く。
+    if [[ $step_parallel == true && $step_interactive == true ]]; then
+      exit 16
+    fi
+    print -r -- "${step_name}"$'\t'"${step_critical}"$'\t'"${step_abort_on_fail}"$'\t'"${step_destructive}"$'\t'"${step_cadence:-daily}"$'\t'"${step_cadence_weekday}"$'\t'"${step_parallel}"$'\t'"${step_disabled}"$'\t'"${step_interactive}" >&4
   ) || rc=$?
   case $rc in
     0)  print -r -- "$out"; return 0 ;;
@@ -472,6 +490,8 @@ _mr_read_meta() {
     14) print -ru2 -- "ERROR: step_parallel と step_abort_on_fail は併用できません: $file"
         print -ru2 -- "       後続が既に走っている状況では「続行するか」を尋ねる意味がありません" ;;
     15) print -ru2 -- "ERROR: step_disabled には無効化の理由を書いてください（true/false は不可）: $file" ;;
+    16) print -ru2 -- "ERROR: step_parallel と step_interactive は併用できません: $file"
+        print -ru2 -- "       並列実行中は複数ステップの出力が混ざり、読める形になりません" ;;
     *)  print -ru2 -- "ERROR: メタデータの取得に失敗しました (rc=$rc): $file" ;;
   esac
   return 1
@@ -508,6 +528,7 @@ _mr_discover() {
     _mr_step_weekday+=("$wd")
     _mr_step_parallel+=("${parts[7]:-false}")
     _mr_step_disabled+=("${parts[8]:-}")
+    _mr_step_interactive+=("${parts[9]:-false}")
     slug=$(_mr_slug_of "$f")
     # slug は action id の前置に使われ、履歴ではカンマ区切りで並ぶ。
     # 区切り文字が混ざると連続日数・NEW・解消の追跡が壊れる。
@@ -575,6 +596,12 @@ _mr_acquire_lock() {
 }
 
 _mr_cleanup() {
+  # 対話ステップの追随用 tail は、本体が中断されると親を失ったまま残り、
+  # 消えた一時ファイルを掴み続ける。ロックより先に落とす。
+  if [[ -n ${_MR_TAIL_PID:-} ]]; then
+    kill "$_MR_TAIL_PID" 2>/dev/null
+    _MR_TAIL_PID=""
+  fi
   [[ -n $_MR_LOCK_DIR ]] && rm -rf "$_MR_LOCK_DIR"
   [[ -n $_MR_TMPDIR ]] && rm -rf "$_MR_TMPDIR"
 }
@@ -908,7 +935,42 @@ _mr_run_step() {
     # 側の tail 抽出・ログ追記を逐次・並列で共通化する。
     local outfile="$_MR_TMPDIR/out.$n"
     : > "$outfile"
-    { _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" } >>"$outfile" 2>&1 || rc=$?
+    if [[ ${_mr_step_interactive[$n]} == true ]]; then
+      # 実行中の出力を人が見る必要があるステップ（例: SSO ログインのコード表示）は、
+      # ステップ完了後にまとめて出すのでは間に合わない。stdout は JSONL 専用のため
+      # 汚せず、出力先は stderr にする。出力先を tee/パイプでつなぐと
+      # _mr_run_with_timeout がパイプの左側としてサブシェルで走ってしまい、
+      # _mr_timed_out 等の呼び出し元グローバル変数への反映が消える。そのため
+      # 従来どおり outfile へ直接書かせつつ、同じファイルを tail -f で stderr へ
+      # 追随させる（zsh の print/echo はバッファなしで write するため、
+      # ファイル越しでもほぼリアルタイムに出る）。
+      # BSD tail (macOS) は kqueue で即時に追随するが、GNU tail (Linux) は
+      # 既定 1 秒のポーリングで眠るため、下の待ち時間では最終行を取りこぼす。
+      # -s でポーリング間隔を縮められるのは GNU だけで、BSD は同名の
+      # オプションを持たずエラーで即死する（出力が丸ごと消える）。
+      # 付けられるかどうかを実際に試してから決める。
+      # -n 0 はファイルを開いた時点の末尾から追随する。ステップが即座に
+      # 認証コードを出してから待つ場合、tail が開く前に書かれた行を永久に
+      # 取りこぼす（下の待ち時間でも回収できない）。outfile は各ステップで
+      # 作り直すので、先頭から追随して差し支えない。
+      local -a tail_opts=(-n +1 -f)
+      if tail -s 0.1 -n 0 /dev/null >/dev/null 2>&1; then
+        tail_opts+=(-s 0.1)
+      fi
+      _MR_TAIL_PID=""
+      tail "${tail_opts[@]}" -- "$outfile" >&2 2>/dev/null &
+      _MR_TAIL_PID=$!
+      { _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" } >>"$outfile" 2>&1 || rc=$?
+      # tail が最終行を拾いきる前に kill すると末尾が欠ける。ポーリング間隔
+      # (0.1s) の数倍を待ってから止める。ここで取りこぼしても outfile 自体は
+      # 完全なので、ログと失敗時の tail には影響しない（欠けるのは画面だけ）。
+      sleep 0.4
+      kill "$_MR_TAIL_PID" 2>/dev/null
+      wait "$_MR_TAIL_PID" 2>/dev/null
+      _MR_TAIL_PID=""
+    else
+      { _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" } >>"$outfile" 2>&1 || rc=$?
+    fi
   else
     _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" || rc=$?
   fi
@@ -1446,9 +1508,39 @@ _mr_iso8601_now() {
 
 # stdout（fd $_MR_JSON_FD）へ出しつつ、myroutine last 用のイベントファイルへも
 # 同じ行を残す。
+#
+# 読み手（レンダラ・pager 等）が先に終わると fd は壊れたパイプになる。ここで
+# SIGPIPE を上げさせると、ハンドラの中から子プロセスを畳むことになり
+# waitjobs で止まる（後続のシグナルは queue されるので TERM でも抜けられない）。
+# そのため --jsonl の間は SIGPIPE を無視し、write の失敗を戻り値で受けて
+# 通常のコードパスで打ち切る。
 _mr_jsonl_write() {
-  print -r -- "$1" >&$_MR_JSON_FD
+  # 無視するのは書き込みの間だけにする。--jsonl の実行中ずっと SIG_IGN に
+  # しておくと、ignore は fork/exec を越えて継承されるため、ステップが呼ぶ
+  # 外部コマンドまで SIGPIPE で終われなくなる（閉じたパイプへ書いても死なず
+  # タイムアウトするなど、通常実行と挙動が変わる）。ハンドラを設定した状態は
+  # 子には SIG_DFL として渡るので、書き終えたら元へ戻す。
+  local __rc=0
+  trap '' PIPE
+  print -r -- "$1" >&$_MR_JSON_FD 2>/dev/null || __rc=$?
+  trap '_mr_on_signal 141' PIPE
+  if (( __rc != 0 )); then
+    _mr_jsonl_reader_gone
+    return 1
+  fi
   [[ -n $_MR_JSONL_EVENTS_FILE ]] && print -r -- "$1" >> "$_MR_JSONL_EVENTS_FILE"
+  return 0
+}
+
+# 読み手が消えた後は stdout に何も届かないので、stderr に 1 行だけ残して畳む。
+# 子を畳むのはシグナルハンドラの外なので waitjobs で詰まらない。
+_mr_jsonl_reader_gone() {
+  (( _MR_JSONL_BROKEN )) && return 0
+  _MR_JSONL_BROKEN=1
+  print -ru2 -- "myroutine: 出力先が閉じられました。実行を打ち切ります。"
+  _mr_kill_descendants $$
+  _mr_cleanup
+  exit 141
 }
 
 _mr_jsonl_emit_run() {
@@ -1542,6 +1634,7 @@ _mr_show_list() {
     [[ ${_mr_step_destructive[$n]} == true ]] && mark+=" ${_MR_C_RED}(破壊的)${_MR_C_RESET}"
     [[ ${_mr_step_abort[$n]} == true ]] && mark+=" ${_MR_C_DIM}(失敗時に続行確認)${_MR_C_RESET}"
     [[ ${_mr_step_parallel[$n]} == true ]] && mark+=" ${_MR_C_GREEN}(parallel)${_MR_C_RESET}"
+    [[ ${_mr_step_interactive[$n]} == true ]] && mark+=" ${_MR_C_CYAN}(interactive)${_MR_C_RESET}"
     if [[ ${_mr_step_cadence[$n]} != daily || -n ${_mr_step_weekday[$n]} ]]; then
       local cad="${_mr_step_cadence[$n]}"
       [[ -n ${_mr_step_weekday[$n]} ]] && cad+="/${(k)_MR_WEEKDAYS[(r)${_mr_step_weekday[$n]}]}"

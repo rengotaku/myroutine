@@ -102,6 +102,7 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 | `step_abort_on_fail` | `false` | 失敗したら続行可否を尋ねる |
 | `step_destructive` | `false` | dry-run では実行せず、`--yes` が無ければ確認を強制する |
 | `step_parallel` | `false` | 実行順で連続する parallel ステップを 1 グループとして同時に実行する。`step_destructive` / `step_abort_on_fail` とは併用できない |
+| `step_interactive` | `false` | 実行中の出力を人が見る必要があるステップに宣言する。`--jsonl` 実行中でも生出力を stderr へそのまま流す（ログへの記録は宣言の有無にかかわらず従来どおり）。`step_parallel` とは併用できない |
 | `step_requires` | `()` | 無いコマンドがあれば失敗ではなく skip |
 | `step_requires_path` | `()` | 無いパスがあれば失敗ではなく skip |
 | `step_timeout` | `600` | 秒。`0` で無制限 |
