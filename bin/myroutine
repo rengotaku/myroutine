@@ -770,7 +770,14 @@ _mr_drain() {
   done < "$chan"
 }
 
+# --jsonl では進捗行をレンダラが出すため、この見出しは重複になる。ただし
+# step_interactive のステップだけは生出力が stderr に流れるので、どのステップの
+# 出力なのかが分かるよう見出しを残す（第 4 引数で明示する）。
 _mr_hdr() {
+  local interactive=${4:-0}
+  if (( _MR_JSONL )) && (( ! interactive )); then
+    return 0
+  fi
   print -r -- ""
   print -r -- "${_MR_C_CYAN}${_MR_C_BOLD}━━━━━ [$1/$2] $3 ━━━━━━━━━━━━━━━━━━━━━${_MR_C_RESET}"
 }
@@ -913,7 +920,8 @@ _mr_run_step() {
   fi
 
   local name=${_mr_step_names[$n]} file=${_mr_step_files[$n]} slug=${_mr_step_slugs[$n]}
-  _mr_hdr "${_mr_enabled_pos[$n]}" "$_MR_ENABLED_TOTAL" "$name"
+  _mr_hdr "${_mr_enabled_pos[$n]}" "$_MR_ENABLED_TOTAL" "$name" \
+    "$( [[ ${_mr_step_interactive[$n]} == true ]] && print -r -- 1 || print -r -- 0 )"
 
   local g=0
   _mr_step_gate "$n" || g=$?
@@ -1040,7 +1048,8 @@ _mr_run_parallel_group() {
 
   # 出力と記録はステップ番号順。並列で走った順序をサマリに漏らさない。
   for n in $group; do
-    _mr_hdr "${_mr_enabled_pos[$n]}" "$_MR_ENABLED_TOTAL" "${_mr_step_names[$n]}"
+    _mr_hdr "${_mr_enabled_pos[$n]}" "$_MR_ENABLED_TOTAL" "${_mr_step_names[$n]}" \
+      "$( [[ ${_mr_step_interactive[$n]} == true ]] && print -r -- 1 || print -r -- 0 )"
     [[ -s "$_MR_TMPDIR/out.$n" ]] && cat "$_MR_TMPDIR/out.$n"
     # res が無いのはゲートで skip / エラーとして記録済みのステップ
     [[ -e "$_MR_TMPDIR/res.$n" ]] || continue
