@@ -1,7 +1,7 @@
 ---
 adr: 0006
 title: runner を Go で書き直し、ステップは zsh の prelude 越しに実行する
-status: proposed
+status: accepted
 date: 2026-10-05
 description: ADR 0001 で捨てた Go 案を採り直す判断。境界を「環境変数で渡し、fd 3 の行で返す」既存の契約に固定し、プリミティブは zsh の prelude に閉じ込める
 issues:
