@@ -1,9 +1,12 @@
-// Package eventlog は myroutine-render の入力 JSONL イベントの型と
-// パースを扱う。壊れた行・未知の ev は呼び出し側が無視できるよう
-// エラーを返すだけで panic しない。
+// Package eventlog は JSONL イベントの型とパース・書き出しを扱う。
+// 書き手（Go の runner）と読み手（レンダラ）で同じ型を使う。壊れた行・未知の
+// ev は呼び出し側が無視できるようエラーを返すだけで panic しない。
 package eventlog
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // RunEvent は実行開始を表す。
 type RunEvent struct {
@@ -17,7 +20,7 @@ type RunEvent struct {
 // 実行に入らないステップでは流れない。
 type StartEvent struct {
 	N    int    `json:"n"`
-	Pos  int    `json:"pos"`
+	Pos  int    `json:"pos,omitempty"`
 	Name string `json:"name"`
 	Slug string `json:"slug"`
 	At   string `json:"at"` // HH:MM:SS
@@ -37,7 +40,8 @@ type StepEvent struct {
 	// Pos は run イベントの total と同じ集合（今回の実行で無効化されていない
 	// ステップ）で数えた通し番号。N（ステップ固有番号）とは分母が異なるため
 	// 別フィールド。古い（pos を持たない）入力では 0 のまま届く。
-	Pos int `json:"pos"`
+	// disabled は total に含まれないので pos を持たない（書き出さない）。
+	Pos int `json:"pos,omitempty"`
 	// EndedAt はステップの終了時刻（HH:MM:SS）。古い入力では空。
 	EndedAt string `json:"ended_at"`
 }
@@ -134,4 +138,58 @@ func Parse(line []byte) (Event, error) {
 		ev.Summary = &s
 	}
 	return ev, nil
+}
+
+// JSONStep は --json の steps 配列の 1 要素。
+type JSONStep struct {
+	N          int    `json:"n"`
+	Name       string `json:"name"`
+	Slug       string `json:"slug"`
+	Status     string `json:"status"`
+	RC         int    `json:"rc"`
+	DurationMs int64  `json:"duration_ms"`
+	Note       string `json:"note"`
+}
+
+// JSONResult は --json が実行終了後に 1 個だけ出す全体の結果。
+type JSONResult struct {
+	Steps    []JSONStep     `json:"steps"`
+	Actions  []ActionItem   `json:"actions"`
+	Todos    []TodoItem     `json:"todos"`
+	Infos    []InfoItem     `json:"infos"`
+	Resolved []string       `json:"resolved"`
+	Disabled []DisabledItem `json:"disabled"`
+}
+
+// Encode は v を 1 行の JSON にする（末尾の改行は含まない）。HTML 用の
+// エスケープ（< を \u003c にする等）はしない。
+func Encode(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+// EncodeEvent は ev を先頭に持つ 1 行の JSONL イベントにする。payload は
+// RunEvent / StartEvent / StepEvent / SummaryEvent のいずれかのポインタ。
+func EncodeEvent(ev string, payload any) ([]byte, error) {
+	body, err := Encode(payload)
+	if err != nil {
+		return nil, err
+	}
+	head, err := Encode(ev)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(body)+len(head)+8)
+	out = append(out, `{"ev":`...)
+	out = append(out, head...)
+	if len(body) > 2 { // "{}" でなければ区切りを入れて中身を続ける
+		out = append(out, ',')
+	}
+	out = append(out, body[1:]...)
+	return out, nil
 }

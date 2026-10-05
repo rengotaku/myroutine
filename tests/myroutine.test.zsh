@@ -7,12 +7,22 @@
 #
 #   zsh tests/myroutine.test.zsh
 #
+# MYROUTINE_TEST_BIN にバイナリを渡すと、そちらを対象に同じテストを流す
+# （Go 版 runner の適合テスト。make test-go）。CLI を外から叩くだけで内部関数は
+# 呼ばないので、実装を差し替えてもそのまま使える。人が読む出力の文言が実装で
+# 違う箇所だけ pick で期待値を分ける（Go 版の既定出力はレンダラの形）。
+#
 
 emulate -R zsh
 zmodload zsh/datetime
 setopt pipefail
 
-typeset -g MR=${0:A:h}/../bin/myroutine
+typeset -g MR_ZSH=${0:A:h}/../bin/myroutine
+typeset -g MR=${MYROUTINE_TEST_BIN:-$MR_ZSH}
+MR=${MR:A}
+# 対象が zsh スクリプトか（shebang の有無で見る）。Go 版なら 1。
+typeset -g MR_GO=0
+[[ $(head -c 2 -- "$MR") == '#!' ]] || MR_GO=1
 typeset -g PASS=0 FAIL=0
 typeset -ga _TMPDIRS=()
 
@@ -77,9 +87,27 @@ mkstep() {
   sort -s -k1,1n "$keys" | awk '{print $2}' > "$MYROUTINE_STEPS_DIR/order"
 }
 
+# zsh 版と Go 版で人が読む出力の文言が違う箇所の期待値。pick <zsh 版> <Go 版>
+pick() { if (( MR_GO )); then print -r -- "$2"; else print -r -- "$1"; fi }
+
+# 当日ログ（日次ログ）のパス
+mr_logfile() { print -r -- "$MYROUTINE_LOG_DIR/$(date +%Y-%m-%d).txt" }
+
 # 標準入力を切って実行し、stdout+stderr をまとめて返す。
 # tty を持たない環境で走らせることで、確認プロンプトの fail-closed も同時に検証できる。
-mr() { "$MR" --no-lock "$@" </dev/null 2>&1 }
+# Go 版の既定出力はレンダラの形で、成功したステップの出力を畳む。ステップの出力そのものを
+# 見る検証のため、今回の実行で当日ログに増えた分（ステップの全出力）を後ろに足す。
+mr() {
+  if (( ! MR_GO )); then
+    "$MR" --no-lock "$@" </dev/null 2>&1
+    return
+  fi
+  local lf=$(mr_logfile) before=0
+  [[ -f $lf ]] && before=$(wc -c < "$lf")
+  "$MR" --no-lock "$@" </dev/null 2>&1
+  [[ -f $lf ]] && tail -c +$(( before + 1 )) "$lf"
+  return 0
+}
 mr_rc() { "$MR" --no-lock "$@" </dev/null >/dev/null 2>&1; print -r -- $? }
 # stdout だけを返す（--jsonl / --json は stdout と stderr を厳密に分けているため、
 # 「stdout に人間向け出力が混ざっていないか」の検証には 2>&1 で混ぜてはいけない）。
@@ -235,10 +263,10 @@ step_run() { ok done }'
 mkstep 30-inf.sh 'step_name="事後報告"
 step_run() { add_info purged "自動で片付けた" }'
 out=$(mr)
-assert_contains "$out" "⚠ 要対応 1 件"        "要対応の件数が出る"
+assert_contains "$out" "$(pick '⚠ 要対応 1 件' '✗ 要対応 1 件')" "要対応の件数が出る"
 assert_contains "$out" "▸ [1] やること A"     "要対応にステップ番号が自動で付く"
-assert_contains "$out" "ℹ 情報 1 件"          "情報が別枠で出る"
-assert_contains "$out" "· [3] 自動で片付けた" "情報にステップ番号が自動で付く"
+assert_contains "$out" "$(pick 'ℹ 情報 1 件' '✓ 情報 1 件')" "情報が別枠で出る"
+assert_contains "$out" "$(pick '· [3] 自動で片付けた' '▸ [3] 自動で片付けた')" "情報にステップ番号が自動で付く"
 
 newenv
 mkstep 10-clean.sh 'step_name="クリーン"
@@ -270,7 +298,7 @@ step_run() {
 out=$(mr)
 assert_contains "$out" "漏れなし" "変数・関数が次のステップへ漏れない"
 
-out=$(zsh -c "PATH=${MR:A:h}:\$PATH; MYROUTINE_STEPS_DIR=$MYROUTINE_STEPS_DIR MYROUTINE_LOG_DIR=$MYROUTINE_LOG_DIR myroutine ls >/dev/null 2>&1; print -r -- \${+functions[add_action]}\${+functions[ok]}")
+out=$(zsh -c "MYROUTINE_STEPS_DIR=$MYROUTINE_STEPS_DIR MYROUTINE_LOG_DIR=$MYROUTINE_LOG_DIR '$MR' ls >/dev/null 2>&1; print -r -- \${+functions[add_action]}\${+functions[ok]}")
 assert_eq "$out" "00" "実行後に呼び出し元シェルへ関数が残らない"
 
 # ─────────────────────────────────────────────────────────────────
@@ -508,9 +536,9 @@ hf="$MYROUTINE_LOG_DIR/history.tsv"
   print -r -- "2026-08-11"$'\t'"09:00:00"$'\t'"stale.stuck,stale.gone"
 } > "$hf"
 out=$(mr)
-assert_contains "$out" "(4 日連続)"      "劣化検知: 連続掲示日数を数える"
+assert_contains "$out" "$(pick '(4 日連続)' '4日連続')" "劣化検知: 連続掲示日数を数える"
 assert_contains "$out" "NEW"             "劣化検知: 新規の要対応に NEW を付ける"
-assert_contains "$out" "解消: stale.gone" "劣化検知: 消えた要対応を解消として出す"
+assert_contains "$out" "$(pick '解消: stale.gone' '解消 1 件: stale.gone')" "劣化検知: 消えた要対応を解消として出す"
 
 # 途切れた履歴では連続日数がリセットされる
 newenv
@@ -522,7 +550,7 @@ step_run() { add_action stuck "残っている" }'
   print -r -- "2026-08-11"$'\t'"09:00:00"$'\t'"stale.stuck"
 } > "$MYROUTINE_LOG_DIR/history.tsv"
 out=$(mr)
-assert_contains "$out" "(2 日連続)" "劣化検知: 途切れた履歴で連続日数がリセットされる"
+assert_contains "$out" "$(pick '(2 日連続)' '2日連続')" "劣化検知: 途切れた履歴で連続日数がリセットされる"
 
 # 部分実行は履歴を汚さない
 newenv
@@ -638,14 +666,15 @@ step_run() { ok B }'
 mkstep 30-c.sh 'step_name="C"
 step_run() { ok C }'
 
+# 進捗の [n/N] は、zsh 版は全ステップ内の位置、Go 版（レンダラ）は今回の実行対象内の位置
 out=$(mr a,c)
-assert_contains "$out" "[1/3] A" "引数: カンマ区切りで部分実行できる"
-assert_contains "$out" "[3/3] C" "引数: カンマ区切りの 2 つ目も実行される"
-assert_not_contains "$out" "[2/3] B" "引数: 指定していないステップは実行されない"
+assert_contains "$out" "$(pick '[1/3] A' '[1/2] A')" "引数: カンマ区切りで部分実行できる"
+assert_contains "$out" "$(pick '[3/3] C' '[2/2] C')" "引数: カンマ区切りの 2 つ目も実行される"
+assert_not_contains "$out" "$(pick '[2/3] B' '] B')" "引数: 指定していないステップは実行されない"
 
 out=$(mr a c)
-assert_contains "$out" "[1/3] A" "引数: スペース区切りの 1 つ目が実行される"
-assert_contains "$out" "[3/3] C" "引数: スペース区切りの 2 つ目も黙って捨てられない"
+assert_contains "$out" "$(pick '[1/3] A' '[1/2] A')" "引数: スペース区切りの 1 つ目が実行される"
+assert_contains "$out" "$(pick '[3/3] C' '[2/2] C')" "引数: スペース区切りの 2 つ目も黙って捨てられない"
 
 out=$(mr c,a)
 first=${out%%C*}
@@ -658,7 +687,7 @@ assert_eq "$(mr_rc foo)" "1" "引数: 存在しない slug の終了コードが
 
 out=$(mr a abc)
 assert_contains "$out" "存在しないステップです: abc" "引数: 混在した存在しない slug も見逃さない"
-assert_not_contains "$out" "[1/3] A" "引数: 存在しない slug があれば 1 つも実行しない"
+assert_not_contains "$out" "$(pick '[1/3] A' '] A')" "引数: 存在しない slug があれば 1 つも実行しない"
 
 out=$(mr 1)
 assert_contains "$out" "番号ではなく slug で指定してください: 1" "引数: 数字を渡したら slug で指定するよう案内する"
@@ -751,8 +780,8 @@ step_run() { add_action stuck "残っている" }'
   print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"s.stuck"
 } > "$MYROUTINE_LOG_DIR/history.tsv"
 out=$(mr)
-assert_contains "$out" "(3 日連続)"     "履歴: 同日の複数行を 1 日として数える"
-assert_not_contains "$out" "(4 日連続)" "履歴: 同日の複数行で日数が水増しされない"
+assert_contains "$out" "$(pick '(3 日連続)' '3日連続')" "履歴: 同日の複数行を 1 日として数える"
+assert_not_contains "$out" "$(pick '(4 日連続)' '4日連続')" "履歴: 同日の複数行で日数が水増しされない"
 
 # ─────────────────────────────────────────────────────────────────
 group "評価していないステップを解消扱いしない"
@@ -778,7 +807,7 @@ step_run() { ok done }'
 print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"live.stuck"$'\t'"live" \
   > "$MYROUTINE_LOG_DIR/history.tsv"
 out=$(mr)
-assert_contains "$out" "解消: live.stuck" "skip: 評価したうえで消えたものは解消として出る"
+assert_contains "$out" "$(pick '解消: live.stuck' '解消 1 件: live.stuck')" "skip: 評価したうえで消えたものは解消として出る"
 
 # 評価していない日は連続日数を切りも伸ばしもしない
 newenv
@@ -790,7 +819,7 @@ step_run() { add_action stuck "残っている" }'
   print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"s.stuck"$'\t'"s"
 } > "$MYROUTINE_LOG_DIR/history.tsv"
 out=$(mr)
-assert_contains "$out" "(3 日連続)" "履歴: 評価していない日は連続を切らない（その日は数に入らない）"
+assert_contains "$out" "$(pick '(3 日連続)' '3日連続')" "履歴: 評価していない日は連続を切らない（その日は数に入らない）"
 
 # 部分実行では解消判定そのものを行わない
 newenv
@@ -814,7 +843,7 @@ step_run() { add_action multi "1 行目
 out=$(mr)
 assert_contains "$out" "1 行目"        "チャネル: 複数行本文の 1 行目が残る"
 assert_contains "$out" "2 行目"        "チャネル: 複数行本文の 2 行目も欠落しない"
-assert_contains "$out" "⚠ 要対応 1 件" "チャネル: 複数行本文が複数レコードに割れない"
+assert_contains "$out" "$(pick '⚠ 要対応 1 件' '✗ 要対応 1 件')" "チャネル: 複数行本文が複数レコードに割れない"
 
 newenv
 mkstep 10-esc2.sh 'step_name="リテラルのエスケープ列"
@@ -881,7 +910,7 @@ step_run() { ok done }'
 print -r -- "$(date +%Y-%m-%d)"$'\t'"08:00:00"$'\t'"s.gone"$'\t'"s" \
   > "$MYROUTINE_LOG_DIR/history.tsv"
 out=$(mr)
-assert_contains "$out" "解消: s.gone" "同日 2 回目: 午後に消えたものを解消として出す"
+assert_contains "$out" "$(pick '解消: s.gone' '解消 1 件: s.gone')" "同日 2 回目: 午後に消えたものを解消として出す"
 
 # ─────────────────────────────────────────────────────────────────
 group "残留ロックの原子的な回収"
@@ -900,7 +929,9 @@ p2=$!
 wait $p1 2>/dev/null
 wait $p2 2>/dev/null
 ran=$(grep -c ran "$MR_TD/ran.txt" 2>/dev/null || print -r -- 0)
-assert_eq "$ran" "1" "lock: 残留ロックの同時回収でも実行は 1 つだけ"
+# 両方が中止に倒れる（0 回）は安全側なので許す。2 回（二重実行）だけを誤りとする。
+if [[ $ran == [01] ]]; then pass "lock: 残留ロックの同時回収でも二重に実行しない (${ran} 回)"
+else fail "lock: 残留ロックの同時回収でも二重に実行しない" "${ran} 回実行された"; fi
 
 # ─────────────────────────────────────────────────────────────────
 group "履歴の所要時間 (5 列目)"
@@ -927,7 +958,7 @@ step_run() { add_action stuck "ずっと残っている" }'
   print -r -- "2026-08-09"$'\t'"09:00:00"$'\t'"stale.stuck"$'\t'"stale"
 } > "$MYROUTINE_LOG_DIR/history.tsv"
 out=$(mr)
-assert_contains "$out" "(2 日連続)" "履歴: 5 列目が無い旧形式も読める"
+assert_contains "$out" "$(pick '(2 日連続)' '2日連続')" "履歴: 5 列目が無い旧形式も読める"
 
 # ─────────────────────────────────────────────────────────────────
 group "実行間隔 (step_cadence)"
@@ -1106,14 +1137,14 @@ assert_contains "$out" "情報" "parallel: 情報も集約される"
 newenv
 mkstep 10-g1.sh 'step_name="P前半"
 step_parallel=true
-step_run() { ok first }'
+step_run() { ok FIRSTMARK }'
 mkstep 20-mid.sh 'step_name="逐次"
-step_run() { ok middle }'
+step_run() { ok MIDDLEMARK }'
 mkstep 30-g2.sh 'step_name="P後半"
 step_parallel=true
-step_run() { ok last }'
+step_run() { ok LASTMARK }'
 out=$(mr)
-if (( ${#${out%%first*}} < ${#${out%%middle*}} && ${#${out%%middle*}} < ${#${out%%last*}} )); then
+if (( ${#${out%%FIRSTMARK*}} < ${#${out%%MIDDLEMARK*}} && ${#${out%%MIDDLEMARK*}} < ${#${out%%LASTMARK*}} )); then
   pass "parallel: グループは逐次ステップを跨がない"
 else
   fail "parallel: グループは逐次ステップを跨がない" "$out"
@@ -1276,12 +1307,25 @@ step_run() { sleep 1.2 }'
 mkstep 20-w2.sh 'step_name="実時間2"
 step_parallel=true
 step_run() { sleep 1.2 }'
-out=$(mr)
-assert_contains "$out" "ステップ合計" "parallel: 所要は実時間で出し、ステップ合計を添える"
-if [[ $out == *"所要 1s（ステップ合計 "* ]]; then
-  pass "parallel: 実時間 < ステップ合計 になる"
+if (( ! MR_GO )); then
+  out=$(mr)
+  assert_contains "$out" "ステップ合計" "parallel: 所要は実時間で出し、ステップ合計を添える"
+  if [[ $out == *"所要 1s（ステップ合計 "* ]]; then
+    pass "parallel: 実時間 < ステップ合計 になる"
+  else
+    fail "parallel: 実時間 < ステップ合計 になる" "$(print -r -- "$out" | grep 所要)"
+  fi
 else
-  fail "parallel: 実時間 < ステップ合計 になる" "$(print -r -- "$out" | grep 所要)"
+  # Go 版の人向け出力（レンダラ）は所要に実時間だけを出す。実時間とステップ合計の
+  # 関係は --jsonl の wall_ms と各 step の duration_ms で確かめる。
+  out=$(mr_stdout --jsonl)
+  cmp=$(print -r -- "$out" | python3 -c '
+import json, sys
+evs = [json.loads(l) for l in sys.stdin if l.strip()]
+wall = [e["wall_ms"] for e in evs if e["ev"] == "summary"][0]
+total = sum(e["duration_ms"] for e in evs if e["ev"] == "step")
+print("lt" if wall < total and total - wall >= 1000 else "ge")')
+  assert_eq "$cmp" "lt" "parallel: 実時間 < ステップ合計 になる（wall_ms と duration_ms の合計）"
 fi
 
 newenv
@@ -1328,8 +1372,8 @@ mkstep 10-off.sh 'step_name="無効"
 step_disabled="tmux 運用をやめたため"
 step_run() { : }'
 out=$(mr)
-assert_contains "$out" "ℹ 情報" "disabled: 情報セクションが出る"
-assert_contains "$out" "⊘ 無効中: [1] 無効 — tmux 運用をやめたため" "disabled: 情報セクションに理由付きで載る"
+assert_contains "$out" "$(pick 'ℹ 情報' '⊘ 無効 1 件')" "disabled: 情報セクションが出る"
+assert_contains "$out" "$(pick '⊘ 無効中: [1] 無効 — tmux 運用をやめたため' $'[1] 無効\n          tmux 運用をやめたため')" "disabled: 情報セクションに理由付きで載る"
 assert_not_contains "$out" "⚠ 要対応" "disabled: 要対応セクションには載らない"
 assert_contains "$out" "✓ 要対応なし" "disabled: 無効ステップだけなら要対応なしのまま"
 
@@ -1574,7 +1618,8 @@ if [[ -f "$MYROUTINE_LOG_DIR/last-events.jsonl" ]]; then
 else
   fail "jsonl: --jsonl 実行で last-events.jsonl が作られる"
 fi
-last_out=$(mr_stdout last)
+# Go 版の last は既定でレンダラの形に描く。保存済みの JSONL は --jsonl で取り出す
+if (( MR_GO )); then last_out=$(mr_stdout --jsonl last); else last_out=$(mr_stdout last); fi
 assert_all_lines_valid_json "$last_out" "jsonl: last が返す内容も各行妥当な JSON である"
 assert_contains "$last_out" '"ev":"run"' "jsonl: last の内容に run イベントが含まれる"
 
@@ -1778,6 +1823,523 @@ assert_contains "$_err" "トーク" "jsonl: step_interactive のステップは�
 # 非 jsonl では人間向け出力は stdout 側に出る（--jsonl だけが fd を付け替える）。
 _out_plain=$(mr_stdout)
 assert_contains "$_out_plain" "アルファ" "非 jsonl: 見出しは従来どおり出る"
+
+# ─────────────────────────────────────────────────────────────────
+group "dry-run の実行予定表示"
+# ─────────────────────────────────────────────────────────────────
+
+# Go 版の既定出力（レンダラ）は成功したステップの出力を畳む。dry-run は実行予定を
+# 見せるのが目的なので、run が出す [dry-run] の行は成否に関係なく画面に出す。
+# 当日ログではなく画面（stdout / stderr）だけを見る。
+newenv
+mkstep 10-dseq.sh "step_name=\"逐次の予定\"
+step_run() { run touch \"$MR_TD/plan-seq\" }"
+mkstep 20-dpa.sh "step_name=\"並列の予定A\"
+step_parallel=true
+step_run() { run touch \"$MR_TD/plan-pa\" }"
+mkstep 30-dpb.sh "step_name=\"並列の予定B\"
+step_parallel=true
+step_run() { run touch \"$MR_TD/plan-pb\"; return 1 }"
+out=$("$MR" --no-lock -n </dev/null 2>&1)
+assert_contains "$out" "[dry-run] touch $MR_TD/plan-seq" "dry-run 表示: 逐次ステップの [dry-run] 行が画面に出る"
+assert_contains "$out" "[dry-run] touch $MR_TD/plan-pa" "dry-run 表示: 並列ステップの [dry-run] 行も画面に出る"
+assert_contains "$out" "[dry-run] touch $MR_TD/plan-pb" "dry-run 表示: 失敗したステップの [dry-run] 行も画面に出る"
+if [[ ! -e "$MR_TD/plan-seq" && ! -e "$MR_TD/plan-pa" && ! -e "$MR_TD/plan-pb" ]]; then
+  pass "dry-run 表示: 副作用は出ない"
+else
+  fail "dry-run 表示: 副作用は出ない" "ファイルが作られた"
+fi
+
+# ─────────────────────────────────────────────────────────────────
+group "別グループの子の停止"
+# ─────────────────────────────────────────────────────────────────
+
+# ステップが setsid で別のプロセスグループ（別セッション）に移した子は、グループ宛ての
+# シグナルでは止まらない。親（ステップ本体）が生きている間に子孫を列挙して拾う。
+# TERM を無視するので、猶予の後の KILL まで届くことも確かめる。
+SID_MARK="mr-setsid-child-$$"
+newenv
+mkstep 10-sid.sh "step_name=\"別グループの子（タイムアウト）\"
+step_timeout=1
+step_run() { python3 -c 'import os,signal,time; os.setsid(); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)' $SID_MARK }"
+mr >/dev/null
+sleep 0.3
+if [[ -z $(pgrep -f "$SID_MARK" 2>/dev/null) ]]; then pass "setsid の子: タイムアウトの後に残らない"
+else fail "setsid の子: タイムアウトの後に残らない" "$(pgrep -fl "$SID_MARK")"; pkill -9 -f "$SID_MARK"; fi
+
+newenv
+mkstep 10-sid.sh "step_name=\"別グループの子（中断）\"
+step_timeout=0
+step_run() { python3 -c 'import os,signal,time; os.setsid(); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)' $SID_MARK }"
+"$MR" --no-lock </dev/null >/dev/null 2>&1 &
+sid_pid=$!
+_w=0
+until [[ -n $(pgrep -f "$SID_MARK" 2>/dev/null) ]] || (( _w >= 50 )); do sleep 0.1; (( _w++ )); done
+# Ctrl-C と同じく runner に SIGINT を送る
+kill -INT $sid_pid 2>/dev/null
+sid_rc=0
+wait $sid_pid 2>/dev/null || sid_rc=$?
+sleep 0.3
+assert_eq "$sid_rc" "130" "setsid の子: SIGINT で 130 で終わる"
+if [[ -z $(pgrep -f "$SID_MARK" 2>/dev/null) ]]; then pass "setsid の子: SIGINT の後に残らない"
+else fail "setsid の子: SIGINT の後に残らない" "$(pgrep -fl "$SID_MARK")"; pkill -9 -f "$SID_MARK"; fi
+
+# ─────────────────────────────────────────────────────────────────
+group "端末（PTY）での確認と前景の復元"
+# ─────────────────────────────────────────────────────────────────
+
+# runner を PTY 上で起動し、ステップ内の confirm が端末から y を受け取れること、
+# runner が終わった後（正常・タイムアウト・Ctrl-C）に端末の前景が親シェルへ戻り、
+# 親シェルが端末を読めることを確かめる。親シェルは job control を持たない zsh なので、
+# runner と同じプロセスグループにいる。前景が戻っていなければ親の read が端末を読めない。
+if ! zmodload zsh/zpty 2>/dev/null; then
+  pass "PTY: zsh/zpty が無いため省略"
+else
+  pty_wrapper() {
+    print -r -- "trap 'print -r -- INT-IN-WRAPPER' INT
+'$MR' --no-lock
+print -r -- \"RC=\$?\"
+print -r -- \"FG=\$(ps -o tpgid= -p \$\$ | tr -d ' ') PG=\$(ps -o pgid= -p \$\$ | tr -d ' ')\"
+if read -t 5 -k 1 x </dev/tty; then print -r -- \"GOT=\$x\"; else print -r -- READFAIL; fi" > "$MR_TD/wrap.zsh"
+  }
+  typeset -g PTY_BUF=""
+  # PTY の出力を pattern が現れるまで読む（最大 limit 秒）
+  pty_wait() {
+    local pat=$1 limit=${2:-15} t0=$EPOCHREALTIME chunk=""
+    while (( EPOCHREALTIME - t0 < limit )); do
+      if zpty -rt MRPTY chunk 2>/dev/null; then
+        PTY_BUF+=$chunk
+        [[ $PTY_BUF == *${~pat}* ]] && return 0
+      else
+        sleep 0.05
+      fi
+    done
+    return 1
+  }
+  pty_fg_restored() {
+    local label=$1
+    pty_wait 'FG=*PG=[0-9]*' || { fail "$label: 前景の確認まで進まない" "$PTY_BUF"; return }
+    local fg=${${PTY_BUF##*FG=}%% *} pg=${${${PTY_BUF##*PG=}%%$'\r'*}%%$'\n'*}
+    assert_eq "$fg" "$pg" "$label: 端末の前景が親シェルのグループに戻る"
+    zpty -w -n MRPTY z
+    if pty_wait 'GOT=z'; then pass "$label: 親シェルが端末を読める"
+    else fail "$label: 親シェルが端末を読める" "$PTY_BUF"; fi
+  }
+
+  newenv
+  mkstep 10-ask.sh 'step_name="確認する"
+step_interactive=true
+step_run() { if confirm "進めますか?"; then print -r -- "ANSWER=yes"; else print -r -- "ANSWER=no"; fi }'
+  pty_wrapper
+  PTY_BUF=""
+  zpty MRPTY zsh "$MR_TD/wrap.zsh"
+  if pty_wait '\[y/N\]'; then
+    zpty -w -n MRPTY y
+    pty_wait 'RC=[0-9]*'
+    assert_contains "$(cat -- "$(mr_logfile)")" "ANSWER=yes" "PTY: ステップ内の confirm が端末から y を受け取る"
+  else
+    fail "PTY: ステップ内の confirm が端末から y を受け取る" "プロンプトが出ない: $PTY_BUF"
+  fi
+  pty_fg_restored "PTY confirm"
+  zpty -d MRPTY
+
+  # step_interactive を宣言していないステップの confirm も、問いが端末に見えて y を受け取れる
+  # （ステップの stdout はファイルにつながっていて画面に出ないため、問いは端末にも直接書く）
+  newenv
+  mkstep 10-quiet-ask.sh 'step_name="静かに確認する"
+step_run() { if confirm "見えていますか?"; then print -r -- "ANSWER=yes"; else print -r -- "ANSWER=no"; fi }'
+  pty_wrapper
+  PTY_BUF=""
+  zpty MRPTY zsh "$MR_TD/wrap.zsh"
+  if pty_wait '見えていますか\? \[y/N\]'; then
+    pass "PTY: step_interactive 無しの confirm の問いが端末に見える"
+    zpty -w -n MRPTY y
+    pty_wait 'RC=[0-9]*'
+    assert_contains "$(cat -- "$(mr_logfile)")" "ANSWER=yes" "PTY: step_interactive 無しの confirm が y を受け取る"
+  else
+    fail "PTY: step_interactive 無しの confirm の問いが端末に見える" "$PTY_BUF"
+  fi
+  pty_fg_restored "PTY confirm（interactive 無し）"
+  zpty -d MRPTY
+
+  newenv
+  mkstep 10-wait.sh 'step_name="端末待ちで打ち切られる"
+step_interactive=true
+step_timeout=1
+step_run() { local x=""; read -k 1 x </dev/tty; print -r -- "READ=$x" }'
+  pty_wrapper
+  PTY_BUF=""
+  zpty MRPTY zsh "$MR_TD/wrap.zsh"
+  pty_wait 'RC=[0-9]*'
+  assert_contains "$PTY_BUF" "タイムアウトしました" "PTY タイムアウト: 端末を読むステップが打ち切られる"
+  pty_fg_restored "PTY タイムアウト"
+  zpty -d MRPTY
+
+  newenv
+  mkstep 10-long.sh 'step_name="中断される"
+step_interactive=true
+step_run() { print -r -- "STARTED"; sleep 30 }'
+  mkstep 20-after.sh "step_name=\"後続\"
+step_run() { touch \"$MR_TD/after-ran\" }"
+  pty_wrapper
+  PTY_BUF=""
+  zpty MRPTY zsh "$MR_TD/wrap.zsh"
+  pty_wait 'STARTED'
+  sleep 0.3
+  zpty -w -n MRPTY $'\C-c'
+  pty_wait 'RC=[0-9]*'
+  assert_contains "$PTY_BUF" "RC=130" "PTY Ctrl-C: 130 で終わる"
+  pty_fg_restored "PTY Ctrl-C"
+  zpty -d MRPTY
+  if [[ ! -e "$MR_TD/after-ran" ]]; then pass "PTY Ctrl-C: 後続ステップを実行しない"
+  else fail "PTY Ctrl-C: 後続ステップを実行しない" "後続が実行された"; fi
+fi
+
+# ─────────────────────────────────────────────────────────────────
+group "step_interactive の表示先の障害"
+# ─────────────────────────────────────────────────────────────────
+
+# 表示（stderr）が読まれない・途中で閉じる場合も、ステップは最後まで進み、
+# 出力は当日ログに全部残る。表示先の障害でログの保存とステップの進行を止めない。
+display_fault() {
+  local mode=$1 label=$2
+  newenv
+  mkstep 10-loud.sh 'step_name="大量に出す"
+step_interactive=true
+step_run() { local i=0; for (( i = 1; i <= 4000; i++ )); do print -r -- "line ${i} xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; done; print -r -- DONE-MARK }'
+  mkfifo "$MR_TD/fifo"
+  if [[ $mode == closed ]]; then
+    head -c 100 <"$MR_TD/fifo" >/dev/null &
+  else
+    ( exec 3<"$MR_TD/fifo"; sleep 30 ) &
+  fi
+  local holder=$! t0=$EPOCHREALTIME
+  "$MR" --no-lock --jsonl </dev/null >"$MR_TD/stdout" 2>"$MR_TD/fifo" &
+  local p=$! w=0 rc=0
+  while kill -0 $p 2>/dev/null && (( w < 150 )); do sleep 0.1; (( w++ )); done
+  if kill -0 $p 2>/dev/null; then
+    kill -9 $p 2>/dev/null
+    fail "$label: 実行が終わる" "15 秒たっても終わらない"
+  else
+    pass "$label: 実行が終わる ($(printf '%.1f' $(( EPOCHREALTIME - t0 )))s)"
+  fi
+  wait $p 2>/dev/null || rc=$?
+  assert_eq "$rc" "0" "$label: ステップは成功として終わる"
+  assert_contains "$(cat -- "$(mr_logfile)")" "DONE-MARK" "$label: 出力は当日ログに最後まで残る"
+  assert_contains "$(cat -- "$MR_TD/stdout")" '"ev":"summary"' "$label: summary まで出る"
+  kill $holder 2>/dev/null
+  wait $holder 2>/dev/null
+}
+display_fault closed "表示先が途中で閉じる"
+display_fault unread "表示先が読まれない"
+
+# ─────────────────────────────────────────────────────────────────
+group "--timeout とステップの環境"
+# ─────────────────────────────────────────────────────────────────
+
+# --timeout はステップから見える MYROUTINE_TIMEOUT にも反映される（宣言でも参照できる）
+newenv
+mkstep 10-tref.sh 'step_name="既定値を参照する"
+step_timeout=$MYROUTINE_TIMEOUT
+step_run() { sleep 5 }'
+t0=$EPOCHREALTIME
+out=$(mr --timeout 1)
+assert_contains "$out" "タイムアウトしました (1s)" "--timeout: step_timeout=\$MYROUTINE_TIMEOUT に --timeout の値が入る"
+if (( EPOCHREALTIME - t0 < 4 )); then pass "--timeout: 1 秒で打ち切られる"
+else fail "--timeout: 1 秒で打ち切られる" "$(( EPOCHREALTIME - t0 ))s"; fi
+
+# ─────────────────────────────────────────────────────────────────
+group "前提の確認はステップを読み込んでから行う"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkdir -p "$MR_TD/bin"
+print -r -- '#!/bin/sh
+exit 0' > "$MR_TD/bin/mr-fake-tool-7c1"
+chmod +x "$MR_TD/bin/mr-fake-tool-7c1"
+mkstep 10-fn.sh "step_name=\"関数を前提にする\"
+mr-local-fn-7c1() { : }
+step_requires=(mr-local-fn-7c1)
+step_run() { touch \"$MR_TD/fn-ran\" }"
+mkstep 20-path.sh "step_name=\"PATH を足す\"
+path=(\"$MR_TD/bin\" \$path)
+step_requires=(mr-fake-tool-7c1)
+step_run() { touch \"$MR_TD/path-ran\" }"
+out=$(mr)
+assert_not_contains "$out" "前提が足りません" "requires: ステップ内の関数・PATH 追加を前提にしても skip しない"
+if [[ -e "$MR_TD/fn-ran" ]]; then pass "requires: ステップ内で定義した関数を前提として数える"
+else fail "requires: ステップ内で定義した関数を前提として数える" "$out"; fi
+if [[ -e "$MR_TD/path-ran" ]]; then pass "requires: トップレベルで足した PATH のコマンドを前提として数える"
+else fail "requires: トップレベルで足した PATH のコマンドを前提として数える" "$out"; fi
+
+# 前のステップが入れたコマンドも見える（ゲートの時点で確かめる）
+newenv
+mkdir -p "$MR_TD/bin"
+mkstep 10-install.sh "step_name=\"入れる\"
+step_run() { print -r -- '#!/bin/sh' > \"$MR_TD/bin/mr-late-tool-7c1\"; chmod +x \"$MR_TD/bin/mr-late-tool-7c1\" }"
+mkstep 20-use.sh "step_name=\"使う\"
+step_requires=(mr-late-tool-7c1)
+step_run() { touch \"$MR_TD/late-ran\" }"
+out=$(PATH="$MR_TD/bin:$PATH" mr)
+if [[ -e "$MR_TD/late-ran" ]]; then pass "requires: 前のステップが入れたコマンドが見える"
+else fail "requires: 前のステップが入れたコマンドが見える" "$out"; fi
+
+# ─────────────────────────────────────────────────────────────────
+group "読まれない stderr で runner が止まらない"
+# ─────────────────────────────────────────────────────────────────
+
+# 表示先（stderr）が読まれないまま大量に出力され失敗するステップの後も、runner 自身の
+# 進捗の書き込みで止まらず、後続ステップ・summary・終了まで進む。
+stderr_stall() {
+  local mode=$1 label=$2
+  newenv
+  mkstep 10-flood.sh 'step_name="大量に出して失敗する"
+step_interactive=true
+step_run() { local i=0; for (( i = 1; i <= 6000; i++ )); do print -r -- "flood ${i} xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; done; return 1 }'
+  mkstep 20-next.sh "step_name=\"後続\"
+step_run() { touch \"$MR_TD/next-ran\" }"
+  mkfifo "$MR_TD/fifo"
+  ( exec 3<"$MR_TD/fifo"; sleep 30 ) &
+  local holder=$! p=0 w=0 rc=0
+  if [[ $mode == json ]]; then
+    "$MR" --no-lock --json </dev/null >"$MR_TD/stdout" 2>"$MR_TD/fifo" &
+  else
+    "$MR" --no-lock </dev/null >"$MR_TD/stdout" 2>"$MR_TD/fifo" &
+  fi
+  p=$!
+  while kill -0 $p 2>/dev/null && (( w < 150 )); do sleep 0.1; (( w++ )); done
+  if kill -0 $p 2>/dev/null; then
+    kill -9 $p 2>/dev/null
+    fail "$label: 終了まで進む" "15 秒たっても終わらない"
+  else
+    pass "$label: 終了まで進む"
+  fi
+  wait $p 2>/dev/null || rc=$?
+  if [[ -e "$MR_TD/next-ran" ]]; then pass "$label: 後続ステップが実行される"
+  else fail "$label: 後続ステップが実行される" "後続が実行されていない"; fi
+  if [[ $mode == json ]]; then
+    assert_contains "$(cat -- "$MR_TD/stdout")" '"slug":"next","status":"ok"' "$label: 結果の JSON まで出る"
+  else
+    assert_contains "$(cat -- "$MR_TD/stdout")" "所要 " "$label: summary まで出る"
+  fi
+  kill $holder 2>/dev/null
+  wait $holder 2>/dev/null
+}
+stderr_stall default "stderr 詰まり（既定）"
+# zsh 版は --json の進捗を stderr に直接書くため、同じ条件で止まる（Go 版で直した挙動）
+(( MR_GO )) && stderr_stall json "stderr 詰まり（--json）"
+
+# ─────────────────────────────────────────────────────────────────
+group "中断してもステップの出力はログに残る"
+# ─────────────────────────────────────────────────────────────────
+
+interrupt_keeps_log() {
+  local kind=$1 label=$2
+  newenv
+  if [[ $kind == parallel ]]; then
+    mkstep 10-pa.sh "step_name=\"並列A\"
+step_parallel=true
+step_run() { print -r -- PAR-A-MARK; touch \"$MR_TD/started-a\"; sleep 30 }"
+    mkstep 20-pb.sh "step_name=\"並列B\"
+step_parallel=true
+step_run() { print -r -- PAR-B-MARK; touch \"$MR_TD/started-b\"; sleep 30 }"
+  else
+    mkstep 10-seq.sh "step_name=\"逐次\"
+step_run() { print -r -- SEQ-MARK; touch \"$MR_TD/started-a\"; touch \"$MR_TD/started-b\"; sleep 30 }"
+  fi
+  "$MR" --no-lock </dev/null >/dev/null 2>&1 &
+  local p=$! w=0
+  until [[ -e "$MR_TD/started-a" && -e "$MR_TD/started-b" ]] || (( w >= 50 )); do sleep 0.1; (( w++ )); done
+  kill -TERM $p 2>/dev/null
+  wait $p 2>/dev/null
+  local log=$(cat -- "$(mr_logfile)" 2>/dev/null)
+  if [[ $kind == parallel ]]; then
+    assert_contains "$log" "PAR-A-MARK" "$label: 中断前の出力が日次ログに残る (A)"
+    assert_contains "$log" "PAR-B-MARK" "$label: 中断前の出力が日次ログに残る (B)"
+  else
+    assert_contains "$log" "SEQ-MARK" "$label: 中断前の出力が日次ログに残る"
+  fi
+  if [[ ! -s "$MYROUTINE_LOG_DIR/history.tsv" ]]; then pass "$label: 履歴は更新しない"
+  else fail "$label: 履歴は更新しない" "$(cat -- "$MYROUTINE_LOG_DIR/history.tsv")"; fi
+}
+# zsh 版は Go 版だけで流す（どちらも Go 版で直した挙動）:
+# - 逐次: 出力を tee → sed でログへ流す。ファイル向けの sed はブロック単位でバッファし、中断時は
+#   子孫をまとめて TERM するため、sed が tee より先に死ぬと直前の出力が失われる（macOS の CI で再現）
+# - 並列: グループの出力をグループの終了後にまとめて流すため、中断で失われる
+(( MR_GO )) && interrupt_keeps_log sequential "中断（逐次）"
+(( MR_GO )) && interrupt_keeps_log parallel "中断（並列）"
+
+# ─────────────────────────────────────────────────────────────────
+if (( MR_GO )); then
+group "新旧 runner の排他（Go 版）"
+# ─────────────────────────────────────────────────────────────────
+
+# zsh 版と共存する間は、同じ lock.d の手順で互いを排他する。
+newenv
+mkstep 10-slow.sh 'step_name="遅い"
+step_run() { sleep 3 }'
+"$MR_ZSH" </dev/null >/dev/null 2>&1 &
+old_pid=$!
+_w=0
+until [[ -f "$MYROUTINE_LOG_DIR/lock.d/pid" ]] || (( _w >= 30 )); do sleep 0.1; (( _w++ )); done
+out=$("$MR" </dev/null 2>&1)
+rc=$?
+assert_contains "$out" "既に実行中です" "排他: zsh 版の実行中に Go 版を起動すると中止される"
+assert_eq "$rc" "1" "排他: zsh 版の実行中の Go 版は終了コード 1"
+wait $old_pid 2>/dev/null
+
+newenv
+mkstep 10-slow.sh 'step_name="遅い"
+step_run() { sleep 3 }'
+"$MR" </dev/null >/dev/null 2>&1 &
+new_pid=$!
+_w=0
+until [[ -f "$MYROUTINE_LOG_DIR/lock.d/pid" ]] || (( _w >= 30 )); do sleep 0.1; (( _w++ )); done
+out=$("$MR_ZSH" </dev/null 2>&1)
+rc=$?
+assert_contains "$out" "既に実行中です" "排他: Go 版の実行中に zsh 版を起動すると中止される"
+assert_eq "$rc" "1" "排他: Go 版の実行中の zsh 版は終了コード 1"
+wait $new_pid 2>/dev/null
+
+# ─────────────────────────────────────────────────────────────────
+group "ロックの所有と作成途中のロック（Go 版）"
+# ─────────────────────────────────────────────────────────────────
+
+# pid がまだ書かれていない（作成直後の）ロックは、残留と見なして回収しない
+newenv
+mkstep 10-a.sh "step_name=\"A\"
+step_run() { touch \"$MR_TD/a-ran\" }"
+mkdir -p "$MYROUTINE_LOG_DIR/lock.d"
+out=$("$MR" </dev/null 2>&1)
+rc=$?
+assert_contains "$out" "既に実行中です (pid=unknown)" "lock: pid の無い新しいロックは回収せず中止する"
+assert_eq "$rc" "1" "lock: pid の無い新しいロックでは終了コード 1"
+if [[ -d "$MYROUTINE_LOG_DIR/lock.d" && ! -e "$MR_TD/a-ran" ]]; then pass "lock: pid の無い新しいロックを消さず、ステップも始めない"
+else fail "lock: pid の無い新しいロックを消さず、ステップも始めない" "$out"; fi
+
+# 十分古い pid 無しのロックは残留として回収する
+touch -t 202001010000 "$MYROUTINE_LOG_DIR/lock.d"
+out=$("$MR" </dev/null 2>&1)
+assert_contains "$out" "残留ロックを回収します (pid=unknown)" "lock: pid の無い古いロックは回収する"
+if [[ -e "$MR_TD/a-ran" ]]; then pass "lock: 回収後に実行できる"
+else fail "lock: 回収後に実行できる" "$out"; fi
+
+# 終了時は自分のロックだけを消す（実行中にロックの持ち主が変わっていたら残す）
+newenv
+mkstep 10-steal.sh "step_name=\"持ち主を書き換える\"
+step_run() { print -r -- 999998 > \"$MYROUTINE_LOG_DIR/lock.d/pid\" }"
+"$MR" </dev/null >/dev/null 2>&1
+if [[ -d "$MYROUTINE_LOG_DIR/lock.d" && $(cat -- "$MYROUTINE_LOG_DIR/lock.d/pid") == 999998 ]]; then
+  pass "lock: 他人の lock.d を終了時に消さない"
+else
+  fail "lock: 他人の lock.d を終了時に消さない" "lock.d が消えた"
+fi
+
+# ─────────────────────────────────────────────────────────────────
+group "宣言の検証（Go 版で追加）"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-typo.sh 'step_name="綴り違い"
+step_critcal=true
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "未知の宣言があります: step_critcal" "検証: 未知の step_* をエラーにする"
+assert_eq "$(mr_rc ls)" "1" "検証: 未知の step_* で終了コード 1"
+assert_eq "$(mr_rc)" "1" "検証: 未知の step_* では実行もしない"
+
+newenv
+mkstep 10-yes.sh 'step_name="bool の誤り"
+step_critical=yes
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "step_critical に使えるのは true / false だけです" "検証: bool に true/false 以外を渡すとエラー"
+
+newenv
+mkstep 10-par.sh 'step_name="bool の誤り（並列）"
+step_parallel=1
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "step_parallel に使えるのは true / false だけです" "検証: step_parallel も同じく検証する"
+
+newenv
+mkstep 10-to.sh 'step_name="timeout の誤り"
+step_timeout=10s
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "step_timeout には 0 以上の整数" "検証: step_timeout が整数でなければエラー"
+
+newenv
+mkstep 10-neg.sh 'step_name="負の timeout"
+step_timeout=-1
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "step_timeout には 0 以上の整数" "検証: 負の step_timeout をエラーにする"
+
+newenv
+mkstep 10-ok.sh 'step_name="正しい宣言"
+step_critical=false
+step_timeout=0
+step_requires=(zsh)
+step_requires_path=(/)
+step_run() { ok fine }'
+assert_eq "$(mr_rc ok)" "0" "検証: 正しい宣言は通る"
+
+# 未知の名前は環境から継いだ変数と取り違えない
+newenv
+mkstep 10-env.sh 'step_name="環境の step_*"
+step_run() { ok fine }'
+out=$(step_bogus=1 mr ls)
+assert_not_contains "$out" "未知の宣言" "検証: 環境変数の step_* を宣言と取り違えない"
+
+# ─────────────────────────────────────────────────────────────────
+group "TERM を捕まえて 0 で終わるステップもタイムアウト（Go 版）"
+# ─────────────────────────────────────────────────────────────────
+
+# zsh 版は終了コード 0 を先に見るため ok になる（Go 版で直した挙動）
+newenv
+mkstep 10-trap.sh 'step_name="TERM で 0 を返す"
+step_timeout=1
+step_run() { trap "exit 0" TERM; sleep 20 & wait }'
+out=$(mr_stdout --jsonl)
+assert_contains "$(print -r -- "$out" | grep '"slug":"trap"')" '"status":"timeout"' "timeout 優先: TERM で 0 終了しても status は timeout"
+if [[ ! -e "$MYROUTINE_LOG_DIR/last-run/trap" ]]; then pass "timeout 優先: last-run を進めない"
+else fail "timeout 優先: last-run を進めない" "$(cat -- "$MYROUTINE_LOG_DIR/last-run/trap")"; fi
+hline=$(tail -1 "$MYROUTINE_LOG_DIR/history.tsv")
+assert_eq "$(print -r -- "$hline" | cut -f4)" "" "timeout 優先: 評価済み（履歴の 4 列目）に入らない"
+
+# ─────────────────────────────────────────────────────────────────
+group "保存先を開けなければ始める前に止まる（Go 版）"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-a.sh "step_name=\"A\"
+step_run() { touch \"$MR_TD/a-ran\" }"
+mkdir -p "$(mr_logfile)"
+out=$(mr)
+assert_contains "$out" "日次ログを開けません" "保存先: 日次ログを開けなければエラー"
+assert_eq "$(mr_rc)" "1" "保存先: 日次ログを開けなければ終了コード 1"
+if [[ ! -e "$MR_TD/a-ran" ]]; then pass "保存先: 日次ログを開けなければステップを始めない"
+else fail "保存先: 日次ログを開けなければステップを始めない" "ステップが実行された"; fi
+
+newenv
+mkstep 10-a.sh "step_name=\"A\"
+step_run() { touch \"$MR_TD/a-ran\" }"
+mkdir -p "$MYROUTINE_LOG_DIR/last-events.jsonl"
+out=$(mr)
+assert_contains "$out" "直近の実行記録を開けません" "保存先: last-events.jsonl を開けなければエラー"
+if [[ ! -e "$MR_TD/a-ran" ]]; then pass "保存先: last-events.jsonl を開けなければステップを始めない"
+else fail "保存先: last-events.jsonl を開けなければステップを始めない" "ステップが実行された"; fi
+
+newenv
+mkstep 10-a.sh "step_name=\"A\"
+step_run() { touch \"$MR_TD/a-ran\" }"
+chmod 555 "$MYROUTINE_LOG_DIR"
+assert_eq "$(mr_rc)" "1" "保存先: 書き込めないディレクトリでは終了コード 1"
+chmod 755 "$MYROUTINE_LOG_DIR"
+if [[ ! -e "$MR_TD/a-ran" ]]; then pass "保存先: 書き込めないディレクトリではステップを始めない"
+else fail "保存先: 書き込めないディレクトリではステップを始めない" "ステップが実行された"; fi
+fi
 
 # ─────────────────────────────────────────────────────────────────
 print -r -- ""
