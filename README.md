@@ -56,6 +56,27 @@ myroutine --jsonl | myroutine-render
 
 `PREFIX` の既定は `~/.local/bin` です。そこが PATH に入っていない環境（macOS の標準構成など）では、上のように PATH の通った場所を指定するか、`~/.local/bin` を PATH へ追加してください。
 
+### Go 版 runner（移行中）
+
+runner を Go で書き直した版が `cmd/myroutine` にあります（[ADR 0006](docs/adr/0006-runner-in-go-with-zsh-step-prelude.md)）。
+ステップの書き方・CLI・状態ファイルは zsh 版と同じで、ステップは埋め込みの zsh の層（`lib/prelude.zsh`）越しに動きます。
+`make install` で `myroutine-render` と一緒に `$(PREFIX)/myroutine` として入ります。
+移行期間中は zsh 版の `bin/myroutine` も残り、上の `ln -s` で入れた呼び出しはそのまま zsh 版を指します。
+
+```sh
+make -C myroutine install PREFIX=~/.local/bin
+~/.local/bin/myroutine          # 既定の出力が myroutine-render の形になる（パイプ不要）
+~/.local/bin/myroutine --jsonl  # 機械向け。--json も同じく使える
+```
+
+zsh 版との違い:
+
+- 既定の出力がレンダラの形になります。成功したステップの出力は畳まれ、全文は日次ログに残ります。dry-run（`-n`）ではステップの出力（`[dry-run] <コマンド>`）をそのまま表示します
+- `myroutine last` は既定で直近の実行をレンダラの形で描きます。保存済みの JSONL は `myroutine --jsonl last` で取り出せます
+- 宣言の検証が増えました。未知の `step_*` 変数、bool（`step_critical` / `step_parallel` / `step_interactive` / `step_abort_on_fail` / `step_destructive`）に `true` / `false` 以外、`step_timeout` に 0 以上の整数以外を書くとエラーになります
+- 逐次ステップは、runner が端末の前景にいるときだけ端末を受け取ります（ステップ内の `confirm` が読めるように）。終わり方にかかわらず端末は runner に戻ります
+- ロックは zsh 版と同じ `lock.d` を使うので、新旧を同時に起動すると後から起動した方が中止されます
+
 ステップは同梱していません。`examples/steps.d/` を参考に自分で書きます。
 
 ```sh
@@ -228,8 +249,9 @@ skip・失敗・タイムアウトしたステップの要対応は「今回出�
 ## 開発
 
 ```sh
-make ci        # 構文チェック + テスト（121 件）
-make test
+make ci        # 構文チェック + zsh 版のテスト + Go 版への適合テスト + go test
+make test      # zsh 版 runner のテスト
+make test-go   # 同じテストを Go 版 runner に流す
 make syntax
 ```
 

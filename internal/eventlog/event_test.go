@@ -1,6 +1,9 @@
 package eventlog
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseStep(t *testing.T) {
 	ev, err := Parse([]byte(`{"ev":"step","n":1,"name":"AWS SSO Login","slug":"aws-sso","status":"ok","rc":0,"duration_ms":8100,"summary":"","note":"","tail":[]}`))
@@ -74,5 +77,31 @@ func TestParseStepEndedAt(t *testing.T) {
 	}
 	if ev.Step == nil || ev.Step.EndedAt != "08:45:03" {
 		t.Fatalf("got %+v", ev.Step)
+	}
+}
+
+func TestEncodeEventRoundTrip(t *testing.T) {
+	line, err := EncodeEvent("step", &StepEvent{N: 2, Name: "<B>", Slug: "b", Status: "disabled", Tail: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(line)
+	if !strings.HasPrefix(s, `{"ev":"step","n":2,`) {
+		t.Errorf("ev が先頭にない: %s", s)
+	}
+	if strings.Contains(s, `"pos"`) {
+		t.Errorf("pos を持たないステップに pos が出た: %s", s)
+	}
+	if !strings.Contains(s, `"name":"<B>"`) || !strings.Contains(s, `"tail":[]`) {
+		t.Errorf("HTML エスケープ・空配列の扱いが違う: %s", s)
+	}
+	ev, err := Parse(line)
+	if err != nil || ev.Ev != "step" || ev.Step.Name != "<B>" {
+		t.Fatalf("読み戻せない: %v %+v", err, ev)
+	}
+
+	line, _ = EncodeEvent("start", &StartEvent{N: 1, Pos: 1, Name: "A", Slug: "a", At: "08:38:00"})
+	if string(line) != `{"ev":"start","n":1,"pos":1,"name":"A","slug":"a","at":"08:38:00"}` {
+		t.Errorf("start = %s", line)
 	}
 }

@@ -6,8 +6,13 @@ myroutine の構成と、どこを触れば何が変わるか。
 
 ## 全体像
 
+runner は 2 つある。移行期間中は zsh 版（`bin/myroutine`）が日常の実行に使われ、
+Go 版（`cmd/myroutine`、[ADR 0006](adr/0006-runner-in-go-with-zsh-step-prelude.md)）が
+同じテストを通る形で並んでいる。Go 版の構成は「[Go 版 runner](#go-版-runner)」節にある。
+以下の節は、特に断りが無ければ zsh 版の説明。
+
 ```
-myroutine (bin/myroutine)          ← FW。この 1 ファイルで完結する
+myroutine (bin/myroutine)          ← FW（zsh 版）。この 1 ファイルで完結する
   │
   ├─ 探索      steps.d/order の宣言順にステップ（<slug>.sh）を読み、位置を番号にする
   │            order とファイルの食い違い・重複はエラーで止める。指定実行は slug
@@ -193,9 +198,81 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
   order 上の位置（`_mr_step_files` の添字）のまま。2 つの番号体系を混同すると
   ヘッダーの表示と一覧の番号が食い違って見える
 
+## Go 版 runner
+
+```
+cmd/myroutine/main.go          ← 入口。runner.Main を呼ぶだけ
+internal/runner/
+  options.go                   ← CLI と環境変数（MYROUTINE_*）の解釈
+  order.go                     ← steps.d/order の読み取りと食い違いの検出
+  meta.go                      ← prelude の meta モードで宣言を取り、検証する
+  runner.go                    ← 全体の流れ・ロック・シグナル・出力先の用意
+  sequence.go                  ← ゲート・実行・記録・並列グループ・abort・サマリ
+  step.go                      ← 1 ステップの起動と待機（タイムアウト・前景・fd 3 の読み戻し）
+  proc.go                      ← 子孫の列挙と停止（TERM → 2 秒 → KILL）
+  tty.go / tty_*.go            ← 端末の前景の受け渡し・y/N の読み取り
+  follow.go                    ← step_interactive の表示（出力ファイルを追って stderr へ）
+  history.go                   ← 実行間隔（cadence）と履歴・劣化検知
+  output.go                    ← 進捗（stderr）・日次ログ・イベントの配信
+  list.go                      ← ls / last / 指定実行の slug の解釈
+lib/prelude.zsh                ← ステップを動かす zsh の層（バイナリに埋め込み）
+internal/eventlog              ← JSONL イベントと --json の型（runner とレンダラで共有）
+internal/format, internal/render ← 人が読む出力（myroutine-render と共有）
+```
+
+### 境界: prelude
+
+Go の runner はステップを `zsh <prelude> meta|exec <step.sh>` の形で起動する。prelude は
+実行のたびに一時ディレクトリへ書き出す。プリミティブ（`ok` / `capture` / `confirm` /
+`run` / `add_action` …）は prelude の中にあり、zsh 版と同じ名前・挙動を持つ。
+
+| 向き | 経路 | 中身 |
+|---|---|---|
+| runner → ステップ | 環境変数 | `MR_DRY_RUN` / `MR_YES` / `MR_IN_PARALLEL` / `MR_STEP_NUM` / `MR_STEP_SLUG` / `MR_NO_COLOR`（prelude が `_MR_*` に移して消す） |
+| ステップ → runner | fd 3 | exec: `A` / `T` / `I` / `S` / `V` / `E`（ADR 0006 表1）。meta: `M`（宣言 1 つ）/ `E` / `D`（最後まで書けた印） |
+
+ステップの source は 2 回（meta と exec）。前提コマンドの有無はゲートの時点で
+`zsh -f -c 'command -v …'` で確かめる（前のステップが入れたコマンドも見えるように）。
+
+### 出力の出し分け
+
+| モード | stdout | stderr | 日次ログ / last-events.jsonl |
+|---|---|---|---|
+| 既定 | レンダラの形（開始行・1 行の結果・サマリ）。dry-run ではステップの出力もそのまま | runner の進捗・エラー、step_interactive の生出力 | 両方書く |
+| `--jsonl` | JSONL イベント | 同上 ＋ step_interactive の見出し | 両方書く |
+| `--json` | 終了後に JSON を 1 個 | レンダラの形 ＋ 同上 | 両方書く |
+
+ステップの出力は常にファイル（`out.<n>`）へ直接つなぎ、日次ログには
+`── [n] 名前 ──` の見出しを付けて ANSI を除いて残す。`myroutine last` は既定で
+レンダラの形に描き、`--jsonl` / `--json` を付けると保存済みの JSONL をそのまま流す。
+
+### プロセスと端末
+
+- ステップは必ず独自のプロセスグループで起動する（`Setpgid`）
+- 逐次ステップは、runner が端末の前景にいるときだけ前景を渡し（`Foreground` / `Ctty`）、
+  終了・タイムアウト・中断のどの場合も runner に戻す。端末設定も渡す前の状態に戻す。
+  前景を渡したステップが端末からの Ctrl-C で落ちたら、runner への SIGINT と同じく全体を中断する
+- 並列ステップには前景を渡さない（並列中の `confirm` は端末を読まずに中止へ倒れる）
+- 停止は `ps` で子孫を列挙した集合とプロセスグループの両方へ TERM → 2 秒 → KILL
+- ロックは zsh 版と同じ `mkdir lock.d` ＋ pid ＋ stale 回収で、新旧が互いを排他する
+
+### Go 版で触るときに壊しやすいところ
+
+- **prelude から Go へ呼び戻す経路を足さない** — 境界は環境変数と fd 3 の行だけ
+- **ステップの出力に `io.MultiWriter` を使わない** — 表示先の障害でステップの書き込みが止まる。
+  表示は `follower` がファイルを追う
+- **前景を渡したら必ず戻す** — `handover.restore` を通らない終わり方を作ると、runner の後に
+  親シェルが端末を読めなくなる
+- **SIGTTOU の無視は `setForeground` の間だけ** — 無視したままにすると以後の子へ SIG_IGN が
+  引き継がれる。ハンドラ（Notify）にすると tcsetpgrp が再開され続けて戻らない
+- **SIGPIPE は Notify で受ける** — `signal.Ignore` にすると子に SIG_IGN が引き継がれ、
+  ステップの外部コマンドが閉じたパイプで終われなくなる
+
 ## テスト
 
-`tests/myroutine.test.zsh` が本体の全挙動を検証する（121 件）。
+`tests/myroutine.test.zsh` が本体の全挙動を検証する。CLI を外から叩くだけなので、
+`MYROUTINE_TEST_BIN` で対象を Go 版に差し替えて同じテストを流せる（`make test-go`）。
+人が読む出力の文言が実装で違う箇所だけ `pick` で期待値を分けている。
 
 外部コマンド（パッケージ管理・git・クラウド CLI・ネットワーク）には一切依存せず、
 振る舞いを固定した fixture ステップをテスト内で生成して使う。ステップを本体から
