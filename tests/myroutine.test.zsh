@@ -64,9 +64,17 @@ newenv() {
   export MR_TD=$td
 }
 
+# ステップを置く。name は「NN-slug.sh」で渡す（NN は実行順を決めるためのテスト用の
+# 並べ替えキーで、本体には渡らない）。ファイルは <slug>.sh として置き、order は
+# NN の昇順に作り直す。本体の契約（order の宣言順）をテストの書きやすさと両立させる。
 mkstep() {
   local name=$1; shift
-  print -r -- "$*" > "$MYROUTINE_STEPS_DIR/$name"
+  local slug=${${name#*-}%.sh}
+  print -r -- "$*" > "$MYROUTINE_STEPS_DIR/${slug}.sh"
+  local keys="$MYROUTINE_STEPS_DIR/.keys"
+  { [[ -f $keys ]] && grep -v -F -x -e "${name%%-*} $slug" "$keys"; print -r -- "${name%%-*} $slug" } > "$keys.new"
+  mv "$keys.new" "$keys"
+  sort -s -k1,1n "$keys" | awk '{print $2}' > "$MYROUTINE_STEPS_DIR/order"
 }
 
 # 標準入力を切って実行し、stdout+stderr をまとめて返す。
@@ -89,25 +97,83 @@ step_run() { ok run }'
 mkstep 20-bravo.sh 'step_name="ブラボー"
 step_run() { ok run }'
 out=$(mr ls)
-assert_contains "$out" "1. アルファ" "ファイル名順に番号が振られる (1)"
-assert_contains "$out" "2. ブラボー" "ファイル名順に番号が振られる (2)"
+assert_contains "$out" "1. alpha  アルファ" "ls: 位置番号と slug が出る (1)"
+assert_contains "$out" "2. bravo  ブラボー" "ls: 位置番号と slug が出る (2)"
+assert_contains "$out" "alpha.sh" "ls: ファイル名も出る"
 
 mkstep 15-charlie.sh 'step_name="チャーリー"
 step_run() { ok run }'
 out=$(mr ls)
-assert_contains "$out" "2. チャーリー" "ファイルを置くだけでステップが増える"
+assert_contains "$out" "2. charlie  チャーリー" "ファイルを置いて order に足すとステップが増える"
 
-mv "$MYROUTINE_STEPS_DIR/15-charlie.sh" "$MYROUTINE_STEPS_DIR/99-charlie.sh"
+print -l alpha bravo charlie > "$MYROUTINE_STEPS_DIR/order"
 out=$(mr ls)
-assert_contains "$out" "3. チャーリー" "リネームだけで順序が変わる"
+assert_contains "$out" "2. bravo" "order の行を入れ替えるだけで順序が変わる (bravo)"
+assert_contains "$out" "3. charlie" "order の行を入れ替えるだけで順序が変わる (charlie)"
 
+# order のコメント・空行・前後の空白
+print -r -- "# 実行順
+alpha   # 先頭
+
+  bravo
+charlie" > "$MYROUTINE_STEPS_DIR/order"
+out=$(mr ls)
+assert_contains "$out" "1. alpha" "order: # 以降のコメントを無視する"
+assert_contains "$out" "2. bravo" "order: 空行と前後の空白を無視する"
+assert_contains "$out" "3. charlie" "order: コメント行・空行で位置がずれない"
+
+# order に無いファイル
 newenv
-mkstep 10-dup.sh 'step_name="A"
+mkstep 10-alpha.sh 'step_name="A"
 step_run() { : }'
-mkstep 20-dup.sh 'step_name="B"
+mkstep 20-bravo.sh 'step_name="B"
+step_run() { : }'
+print -l alpha > "$MYROUTINE_STEPS_DIR/order"
+out=$(mr ls)
+assert_contains "$out" "order に書かれていないステップがあります: bravo.sh" "order に無い .sh をエラーにする（黙って無視しない）"
+assert_eq "$(mr_rc ls)" "1" "order に無い .sh は終了コード 1"
+assert_eq "$(mr_rc)" "1" "order に無い .sh では全体実行も止まる"
+
+# order にあるがファイルが無い
+print -l alpha bravo ghost > "$MYROUTINE_STEPS_DIR/order"
+out=$(mr ls)
+assert_contains "$out" "ファイルがありません: ghost.sh" "order にあるのにファイルが無い slug をエラーにする"
+assert_eq "$(mr_rc ls)" "1" "ファイル欠落は終了コード 1"
+
+# order 内の重複
+print -l alpha bravo alpha > "$MYROUTINE_STEPS_DIR/order"
+out=$(mr ls)
+assert_contains "$out" "order で slug が重複しています: alpha" "order 内の重複をエラーにする"
+assert_eq "$(mr_rc ls)" "1" "order の重複は終了コード 1"
+
+# order ファイル自体が無い
+rm "$MYROUTINE_STEPS_DIR/order"
+out=$(mr ls)
+assert_contains "$out" "実行順の宣言ファイルがありません" "order ファイルが無ければエラーにする"
+assert_eq "$(mr_rc)" "1" "order ファイルが無いと終了コード 1"
+
+# サブコマンドと衝突する slug / 数字だけの slug
+newenv
+mkstep 10-ls.sh 'step_name="L"
 step_run() { : }'
 out=$(mr ls)
-assert_contains "$out" "slug が重複" "slug 重複を検出してエラーにする"
+assert_contains "$out" "サブコマンドと衝突しています: ls" "slug が ls / last と衝突したらエラーにする"
+newenv
+mkstep 10-42.sh 'step_name="N"
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "slug を数字だけにはできません: 42" "数字だけの slug をエラーにする"
+
+# 複数の問題は 1 回で全部出す
+newenv
+mkstep 10-a.sh 'step_name="A"
+step_run() { : }'
+mkstep 20-b.sh 'step_name="B"
+step_run() { : }'
+print -l a ghost > "$MYROUTINE_STEPS_DIR/order"
+out=$(mr ls)
+assert_contains "$out" "ghost.sh" "複数の不整合: ファイル欠落を報告する"
+assert_contains "$out" "b.sh" "複数の不整合: order 漏れも同時に報告する"
 
 newenv
 mkstep 10-noname.sh 'step_run() { : }'
@@ -258,7 +324,7 @@ newenv
 mkstep 10-vv.sh 'step_name="run 成功 verify 成功"
 step_run() { return 0 }
 step_verify() { return 0 }'
-assert_eq "$(mr_rc 1)" "0" "verify: run 成功 / verify 成功 → 成功"
+assert_eq "$(mr_rc vv)" "0" "verify: run 成功 / verify 成功 → 成功"
 
 newenv
 mkstep 10-vf.sh 'step_name="run 成功 verify 失敗"
@@ -453,7 +519,7 @@ mkstep 10-a.sh 'step_name="A"
 step_run() { add_action a "A" }'
 mkstep 20-b.sh 'step_name="B"
 step_run() { add_action b "B" }'
-mr 1 >/dev/null
+mr a >/dev/null
 if [[ ! -s "$MYROUTINE_LOG_DIR/history.tsv" ]]; then pass "劣化検知: 部分実行は履歴に記録しない"
 else fail "劣化検知: 部分実行は履歴に記録しない" "記録された"; fi
 
@@ -561,29 +627,38 @@ step_run() { ok B }'
 mkstep 30-c.sh 'step_name="C"
 step_run() { ok C }'
 
-out=$(mr 1,3)
+out=$(mr a,c)
 assert_contains "$out" "[1/3] A" "引数: カンマ区切りで部分実行できる"
 assert_contains "$out" "[3/3] C" "引数: カンマ区切りの 2 つ目も実行される"
 assert_not_contains "$out" "[2/3] B" "引数: 指定していないステップは実行されない"
 
-out=$(mr 1 3)
+out=$(mr a c)
 assert_contains "$out" "[1/3] A" "引数: スペース区切りの 1 つ目が実行される"
 assert_contains "$out" "[3/3] C" "引数: スペース区切りの 2 つ目も黙って捨てられない"
 
-out=$(mr 3,1)
+out=$(mr c,a)
 first=${out%%C*}
 if [[ $first != *"A"* ]]; then pass "引数: 指定した順で実行される"
 else fail "引数: 指定した順で実行される" "$out"; fi
 
 out=$(mr foo)
-assert_contains "$out" "ステップ番号ではありません: foo" "引数: 非数値をエラーにする"
-assert_eq "$(mr_rc foo)" "1" "引数: 非数値の終了コードが 1"
+assert_contains "$out" "存在しないステップです: foo" "引数: 存在しない slug をエラーにする"
+assert_eq "$(mr_rc foo)" "1" "引数: 存在しない slug の終了コードが 1"
 
-out=$(mr 1 abc)
-assert_contains "$out" "ステップ番号ではありません: abc" "引数: 混在した非数値も見逃さない"
+out=$(mr a abc)
+assert_contains "$out" "存在しないステップです: abc" "引数: 混在した存在しない slug も見逃さない"
+assert_not_contains "$out" "[1/3] A" "引数: 存在しない slug があれば 1 つも実行しない"
+
+out=$(mr 1)
+assert_contains "$out" "番号ではなく slug で指定してください: 1" "引数: 数字を渡したら slug で指定するよう案内する"
+assert_contains "$out" "myroutine ls" "引数: 数字エラーで ls で slug を確認できると案内する"
+assert_eq "$(mr_rc 1)" "1" "引数: 数字指定の終了コードが 1"
+
+out=$(mr a,2)
+assert_contains "$out" "番号ではなく slug で指定してください: 2" "引数: slug に混ざった数字も見逃さない"
 
 out=$(mr 99)
-assert_contains "$out" "ステップ 99 は存在しません" "引数: 範囲外をエラーにする"
+assert_contains "$out" "番号ではなく slug で指定してください: 99" "引数: 範囲外の数字も同じエラーにする"
 
 out=$("$MR" --bogus </dev/null 2>&1)
 assert_contains "$out" "不明なオプション" "引数: 不明なオプションをエラーにする"
@@ -714,7 +789,7 @@ mkstep 20-b.sh 'step_name="B"
 step_run() { add_action b "B" }'
 print -r -- "2026-08-12"$'\t'"09:00:00"$'\t'"a.a,b.b"$'\t'"a,b" \
   > "$MYROUTINE_LOG_DIR/history.tsv"
-out=$(mr 1)
+out=$(mr a)
 assert_not_contains "$out" "解消: b.b" "部分実行: 未選択ステップを解消扱いしない"
 
 # ─────────────────────────────────────────────────────────────────
@@ -876,7 +951,7 @@ assert_not_contains "$out" "週次が走った" "cadence: weekly は 7 日未満
 out=$(MYROUTINE_NOW_EPOCH=$TUE mr --force-cadence)
 assert_contains "$out" "週次が走った" "cadence: --force-cadence で間隔判定を無視する"
 
-out=$(MYROUTINE_NOW_EPOCH=$TUE mr 1)
+out=$(MYROUTINE_NOW_EPOCH=$TUE mr weekly)
 assert_contains "$out" "週次が走った" "cadence: 番号を指定した実行は間隔判定をしない"
 
 newenv
@@ -1146,7 +1221,7 @@ out=$(MYROUTINE_PARALLEL_MAX=1 mr)
 assert_contains "$out" "A の要対応" "parallel: MYROUTINE_PARALLEL_MAX=1 でも全ステップを実行する (1)"
 assert_contains "$out" "B の要対応" "parallel: MYROUTINE_PARALLEL_MAX=1 でも全ステップを実行する (2)"
 
-# 番号指定の実行でも並列にまとまる
+# 指定の実行でも並列にまとまる
 newenv
 mkstep 10-ps1.sh 'step_name="指定1"
 step_parallel=true
@@ -1157,14 +1232,14 @@ step_run() { sleep 1; ok s2 }'
 mkstep 30-ps3.sh 'step_name="指定3"
 step_run() { ok s3 }'
 t0=$EPOCHREALTIME
-out=$(mr 1,2)
+out=$(mr ps1,ps2)
 elapsed=$(( EPOCHREALTIME - t0 ))
 if (( elapsed < 1.8 )); then
-  pass "parallel: 番号指定の実行でも並列にまとまる (${elapsed}s)"
+  pass "parallel: 指定の実行でも並列にまとまる (${elapsed}s)"
 else
-  fail "parallel: 番号指定の実行でも並列にまとまる" "${elapsed}s かかった"
+  fail "parallel: 指定の実行でも並列にまとまる" "${elapsed}s かかった"
 fi
-assert_not_contains "$out" "s3" "parallel: 番号指定の範囲外は実行しない"
+assert_not_contains "$out" "s3" "parallel: 指定の範囲外は実行しない"
 
 # dry-run は並列でも副作用を出さない
 newenv
@@ -1249,16 +1324,16 @@ assert_contains "$out" "✓ 要対応なし" "disabled: 無効ステップだけ
 
 newenv
 mkstep 10-off.sh 'step_name="無効"
-step_disabled="番号指定でも実行しない"
+step_disabled="指定でも実行しない"
 step_run() { touch "'"$MR_TD"'/off-ran" }'
-out=$(mr 1)
+out=$(mr off)
 if [[ ! -e "$MR_TD/off-ran" ]]; then
-  pass "disabled: 番号指定実行でも実行されない"
+  pass "disabled: 指定実行でも実行されない"
 else
-  fail "disabled: 番号指定実行でも実行されない" "step_run が走ってファイルができていた"
+  fail "disabled: 指定実行でも実行されない" "step_run が走ってファイルができていた"
 fi
-assert_contains "$out" "⊘ 無効: 番号指定でも実行しない" "disabled: 番号指定実行では理由を表示する"
-assert_contains "$out" "戻すには steps.d/10-off.sh の step_disabled を消す" "disabled: 番号指定実行では戻し方を表示する"
+assert_contains "$out" "⊘ 無効: 指定でも実行しない" "disabled: 指定実行では理由を表示する"
+assert_contains "$out" "戻すには steps.d/off.sh の step_disabled を消す" "disabled: 指定実行では戻し方を表示する"
 
 newenv
 mkstep 10-bad.sh 'step_name="不正"
@@ -1401,7 +1476,7 @@ mkstep 80-h.sh 'step_name="H"
 step_run() { ok H }'
 mkstep 90-i.sh 'step_name="I"
 step_run() { ok I }'
-out=$(mr_stdout --jsonl 5,9)
+out=$(mr_stdout --jsonl e,i)
 run_line=$(jsonl_line "$out" run)
 assert_contains "$run_line" '"total":2' "jsonl: 部分実行の total は指定したステップ数（無効ステップ除く）"
 pos_e=$(print -r -- "$out" | grep '"slug":"e"')
@@ -1575,7 +1650,81 @@ wait $_pipe_pid 2>/dev/null
 
 # 読み手が生きている通常の構成は従来どおり全イベントが届く。
 _out=$("$MR" --no-lock --jsonl </dev/null 2>/dev/null | cat)
-assert_eq "$(print -r -- "$_out" | grep -c '"ev"')" "3" "jsonl: 読み手が生きていれば run/step/summary が揃う"
+assert_eq "$(print -r -- "$_out" | grep -c '"ev"')" "4" "jsonl: 読み手が生きていれば run/start/step/summary が揃う"
+
+# ─────────────────────────────────────────────────────────────────
+group "--jsonl: start イベントと終了時刻"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-first.sh 'step_name="最初"
+step_run() { ok A }'
+mkstep 20-slow.sh 'step_name="遅い"
+step_run() { ok B }'
+out=$(mr_stdout --jsonl)
+start_first=$(print -r -- "$out" | grep '"ev":"start"' | grep '"slug":"first"')
+assert_contains "$start_first" '"n":1' "start: n を持つ"
+assert_contains "$start_first" '"pos":1' "start: pos を持つ"
+assert_contains "$start_first" '"name":"最初"' "start: name を持つ"
+if [[ $start_first =~ '"at":"[0-9][0-9]:[0-9][0-9]:[0-9][0-9]"' ]]; then pass "start: at は HH:MM:SS"
+else fail "start: at は HH:MM:SS" "$start_first"; fi
+assert_eq "$(print -r -- "$out" | grep -c '"ev":"start"')" "2" "start: 実行に入った全ステップで流れる"
+# 並び: run → start → step の順で、ステップごとに start が step の直前に来る
+evs=$(print -r -- "$out" | sed -E 's/.*"ev":"([a-z]+)".*/\1/' | tr '\n' ' ')
+assert_eq "$evs" "run start step start step summary " "start: run → start → step → ... → summary の順で出る"
+step_first=$(print -r -- "$out" | grep '"ev":"step"' | grep '"slug":"first"')
+if [[ $step_first =~ '"ended_at":"[0-9][0-9]:[0-9][0-9]:[0-9][0-9]"' ]]; then pass "step: ended_at は HH:MM:SS"
+else fail "step: ended_at は HH:MM:SS" "$step_first"; fi
+
+# start は step より前に出る（ステップ実行中に start だけが見えている状態になる）
+newenv
+mkstep 10-long.sh 'step_name="長い"
+step_run() { sleep 2; ok L }'
+_ev1=$(mktemp -t mrtest-ev-XXXXXX); _TMPDIRS+=("$_ev1")
+"$MR" --no-lock --jsonl </dev/null 2>/dev/null > "$_ev1" &
+_pid=$!
+_w=0
+until grep -q '"ev":"start"' "$_ev1" 2>/dev/null || (( _w >= 30 )); do sleep 0.1; (( _w++ )); done
+assert_contains "$(<$_ev1)" '"ev":"start"' "start: ステップの実行中に start が先に出ている"
+assert_not_contains "$(<$_ev1)" '"ev":"step"' "start: ステップ完了前には step がまだ出ていない"
+wait $_pid 2>/dev/null
+
+# skip / 無効 / 間隔外 / 前提不足では start を出さない
+newenv
+mkstep 10-run.sh 'step_name="走る"
+step_run() { ok R }'
+mkstep 20-need.sh 'step_name="前提なし"
+step_requires=(definitely-not-a-command-xyz)
+step_run() { ok N }'
+mkstep 30-off.sh 'step_name="無効"
+step_disabled="start 確認用"
+step_run() { ok O }'
+mkstep 40-weekly.sh 'step_name="週次"
+step_cadence=weekly
+step_run() { ok W }'
+mkdir -p "$MYROUTINE_LOG_DIR/last-run"
+print -r -- "$(date +%Y-%m-%d)" > "$MYROUTINE_LOG_DIR/last-run/weekly"
+out=$(mr_stdout --jsonl)
+assert_eq "$(print -r -- "$out" | grep -c '"ev":"start"')" "1" "start: skip・無効・間隔外・前提不足のステップでは流れない"
+assert_contains "$(print -r -- "$out" | grep '"ev":"start"')" '"slug":"run"' "start: 実行したステップだけに流れる"
+
+# 並列ステップでも各ステップの実行開始時に流れる
+newenv
+mkstep 10-pa.sh 'step_name="並列A"
+step_parallel=true
+step_run() { sleep 0.5; ok a }'
+mkstep 20-pb.sh 'step_name="並列B"
+step_parallel=true
+step_run() { sleep 0.5; ok b }'
+out=$(mr_stdout --jsonl)
+assert_eq "$(print -r -- "$out" | grep -c '"ev":"start"')" "2" "start: 並列ステップも各ステップで流れる"
+assert_contains "$(print -r -- "$out" | grep '"ev":"start"' | grep '"slug":"pb"')" '"pos":2' "start: 並列ステップにも pos が付く"
+if [[ $(print -r -- "$out" | grep '"ev":"step"' | grep -c '"ended_at":"[0-9][0-9]:[0-9][0-9]:[0-9][0-9]"') == 2 ]]; then pass "step: 並列ステップにも ended_at が付く"
+else fail "step: 並列ステップにも ended_at が付く" "$out"; fi
+
+# 指定実行でも流れる
+out=$(mr_stdout --jsonl pa)
+assert_eq "$(print -r -- "$out" | grep -c '"ev":"start"')" "1" "start: 指定実行でも実行したステップだけ流れる"
 
 # ─────────────────────────────────────────────────────────────────
 group "--jsonl と並列ステップの生出力"

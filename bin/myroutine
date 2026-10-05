@@ -5,13 +5,13 @@
 # Usage:
 #   myroutine [options]              全ステップを順に実行
 #   myroutine [options] ls           ステップ一覧を表示
-#   myroutine [options] 1,3,5        指定したステップのみを指定順で実行
+#   myroutine [options] brew,omz     指定した slug のステップのみを指定順で実行（slug は ls で確認）
 #
 # Options:
 #   -n, --dry-run     副作用を実行せず、実行予定を表示する
 #   -y, --yes         確認プロンプトを自動承認する
 #       --json        結果を機械可読な JSON で出力する（実行終了後に 1 個）
-#       --jsonl       ステップ完了ごとに 1 行の JSON イベントを出力する（--json とは併用不可）
+#       --jsonl       ステップの開始・完了ごとに 1 行の JSON イベントを出力する（--json とは併用不可）
 #       --timeout N   ステップの既定タイムアウト秒 (0 で無制限)
 #       --no-lock     多重起動ロックを取らない (テスト用)
 #       --force-cadence  step_cadence の間隔判定を無視して実行する
@@ -21,11 +21,15 @@
 # ステップ契約
 # ─────────────────────────────────────────────────────────────────
 #
-# ステップは $MYROUTINE_STEPS_DIR に「NN-name.sh」形式で 1 ファイル 1 ステップ置く。
-# 実行順はファイル名順で、ステップ番号はそこから導出される。順序を変えたいときは
-# ファイルをリネームするだけでよく、本体を含め他のどこも触らない。
+# ステップは $MYROUTINE_STEPS_DIR に「<slug>.sh」形式で 1 ファイル 1 ステップ置く。
+# slug はファイル名から .sh を除いたもの（英数字と _ - だけ。数字だけ・ls・last は不可）。
+# 実行順は $MYROUTINE_STEPS_DIR/order に 1 行 1 slug で書いた順（# 以降はコメント、
+# 空行可）。順序を変えたいときは order の行を入れ替えるだけでよい。
+# order にあるのにファイルが無い slug、ファイルがあるのに order に無い slug、
+# order 内の重複はいずれもエラーで止まる（黙って読み飛ばさない）。
+# 指定実行は slug で行う（myroutine brew,omz）。slug は myroutine ls で確認できる。
 #
-#   # steps.d/50-brew-update.sh
+#   # steps.d/brew-update.sh
 #   step_name="Brew Update"        # 必須。一覧とヘッダーに出る名前
 #   step_critical=true             # 任意 (既定 false)。失敗しても後続は続行するが、
 #                                  #   要対応サマリに critical として記録される
@@ -53,12 +57,12 @@
 #                                  #   ときだけ実行する（mon..sun / 1..7、1=月曜）
 #   step_disabled="2026-09-17: ..."  # 任意 (既定 空文字列 = 有効)。非空文字列を入れると
 #                                  #   無効化の「理由」として扱い、そのステップは実行
-#                                  #   しない（番号を指定しても実行しない）。実行総数・
+#                                  #   しない（slug を指定しても実行しない）。実行総数・
 #                                  #   ヘッダー番号から外れ、結果は ok/fail/skip とは別の
 #                                  #   disabled として記録される（要対応の解消判定・
 #                                  #   連続日数・履歴には影響しない）。最終サマリの情報
 #                                  #   セクションと myroutine ls に理由が出るので、
-#                                  #   ファイル名から番号を外して一覧から消したり、
+#                                  #   order から外して一覧から消したり、
 #                                  #   存在しないパスを step_requires_path に書いて毎回
 #                                  #   skip させたりする代わりに使う。true/false は
 #                                  #   （bool ではなく理由の文字列のため）エラーになる
@@ -141,7 +145,7 @@ typeset -g _MR_RUN_T0=0
 # ─────────────────────────────────────────────────────────────────
 
 _mr_usage() {
-  print -r -- "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json|--jsonl] [--timeout N] [--no-lock] [--force-cadence] [ls | last | <ステップ番号: 1,3,5>]"
+  print -r -- "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json|--jsonl] [--timeout N] [--no-lock] [--force-cadence] [ls | last | <slug: brew,omz>]"
 }
 
 typeset -ga _mr_argv=()
@@ -327,6 +331,9 @@ typeset -ga _mr_enabled_pos=()
 typeset -g _MR_ENABLED_TOTAL=0
 typeset -ga _mr_step_cadence=() _mr_step_weekday=()
 typeset -ga _mr_result_status=() _mr_result_rc=() _mr_result_ms=() _mr_result_note=()
+# --jsonl の step イベントに載せる終了時刻（HH:MM:SS）。並列ではグループ全体の
+# 終了ではなく、そのステップ自身が終わった時刻を入れるため結果とは別に持つ。
+typeset -ga _mr_result_ended=()
 # --jsonl 専用。summary は emit_summary の宣言、tail は失敗ステップの出力末尾。
 typeset -ga _mr_result_summary=() _mr_result_tail=()
 # 実際に実行して要対応の有無を評価できたステップの slug。
@@ -349,7 +356,7 @@ typeset -g _MR_FULL_RUN=0
 # 連続日数からも自動的に外れる（前提不足の skip と同じ扱い）。
 #
 # 前回成功日は $MYROUTINE_LOG_DIR/last-run/<slug> に YYYY-MM-DD で持つ。
-# 番号を指定した実行 (myroutine 5) は明示指定なので間隔判定をしない。
+# slug を指定した実行 (myroutine brew) は明示指定なので間隔判定をしない。
 
 typeset -gA _MR_WEEKDAYS=(mon 1 tue 2 wed 3 thu 4 fri 5 sat 6 sun 7)
 typeset -ga _MR_WEEKDAY_JA=(月 火 水 木 金 土 日)
@@ -373,6 +380,13 @@ _mr_now_epoch() {
   else
     print -r -- "$EPOCHSECONDS"
   fi
+}
+
+# 実時刻の HH:MM:SS（MYROUTINE_NOW_EPOCH は間隔判定用の擬似時計なので使わない）
+_mr_hms_now() {
+  local t=""
+  strftime -s t '%H:%M:%S' "$EPOCHSECONDS"
+  print -r -- "$t"
 }
 
 _mr_stamp_file() { print -r -- "$MYROUTINE_LOG_DIR/last-run/$1" }
@@ -435,12 +449,6 @@ _mr_cadence_due() {
   return 1
 }
 
-_mr_slug_of() {
-  local base=${1:t}
-  base=${base%.sh}
-  print -r -- "${base#*-}"
-}
-
 # ステップを 1 つサブシェルで source し、メタデータだけを取り出す。
 # 契約違反 (トップレベルの出力) が結果を汚さないよう stdout は捨て、
 # メタデータは fd 4 で取り出す。
@@ -497,19 +505,99 @@ _mr_read_meta() {
   return 1
 }
 
+# 実行順の宣言ファイル（$MYROUTINE_STEPS_DIR/order）を読み、slug の並びを
+# _mr_order_slugs に入れる。1 行 1 slug で、# 以降はコメント、空行は無視する。
+# 並びとファイルの食い違いは黙って読み飛ばさず、見つけた分をすべて報告して止める。
+typeset -ga _mr_order_slugs=()
+# サブコマンドと同名の slug は指定実行と区別できない。
+typeset -ga _MR_RESERVED_SLUGS=(ls last)
+
+_mr_read_order() {
+  setopt localoptions extendedglob   # 前後の空白除去（[[:space:]]#）に使う
+  local order_file="$MYROUTINE_STEPS_DIR/order"
+  if [[ ! -f $order_file ]]; then
+    print -ru2 -- "ERROR: 実行順の宣言ファイルがありません: $order_file"
+    print -ru2 -- "       1 行 1 slug で実行順を書いてください（slug = ステップのファイル名から .sh を除いたもの）"
+    return 1
+  fi
+  if [[ ! -r $order_file ]]; then
+    print -ru2 -- "ERROR: 実行順の宣言ファイルを読めません: $order_file"
+    return 1
+  fi
+
+  local line="" slug="" lineno=0 bad=0
+  local f=""
+  local -a declared=()
+  _mr_order_slugs=()
+  while IFS= read -r line || [[ -n $line ]]; do
+    (( lineno++ ))
+    line=${line%%\#*}
+    slug=${${line##[[:space:]]#}%%[[:space:]]#}
+    [[ -z $slug ]] && continue
+    # slug は action id に "<slug>.<id>" の形で前置される。slug 自身がドットを
+    # 含むと id からの復元（最初のドットまで）が壊れ、連続日数・NEW・解消の
+    # 判定対象から漏れる。履歴の区切り文字（カンマ）も入れられない。
+    # 指定実行ではカンマ・空白が区切りになるため、その点でも使えない。
+    if [[ ! $slug =~ '^[A-Za-z0-9_-]+$' ]]; then
+      print -ru2 -- "ERROR: ステップ slug に使えるのは英数字と _ - だけです: ${slug} (order:${lineno})"
+      bad=1; continue
+    fi
+    if [[ $slug == <-> ]]; then
+      print -ru2 -- "ERROR: slug を数字だけにはできません: ${slug} (order:${lineno})"
+      print -ru2 -- "       指定実行で番号と区別できないため、英字を含めてください"
+      bad=1; continue
+    fi
+    if (( ${_MR_RESERVED_SLUGS[(Ie)$slug]} )); then
+      print -ru2 -- "ERROR: slug がサブコマンドと衝突しています: ${slug} (order:${lineno})"
+      print -ru2 -- "       ls / last は使えません。別の slug に変えてください"
+      bad=1; continue
+    fi
+    if (( ${declared[(Ie)$slug]} )); then
+      print -ru2 -- "ERROR: order で slug が重複しています: ${slug} (order:${lineno})"
+      print -ru2 -- "       slug は要対応 id の前置に使うため一意である必要があります"
+      bad=1; continue
+    fi
+    declared+=("$slug")
+  done < "$order_file"
+
+  # order にあるのにファイルが無い
+  for slug in $declared; do
+    if [[ ! -f $MYROUTINE_STEPS_DIR/${slug}.sh ]]; then
+      print -ru2 -- "ERROR: order に書かれているステップのファイルがありません: ${slug}.sh"
+      bad=1
+    fi
+  done
+  # ファイルはあるのに order に無い
+  for f in $MYROUTINE_STEPS_DIR/*.sh(N); do
+    slug=${${f:t}%.sh}
+    if (( ! ${declared[(Ie)$slug]} )); then
+      print -ru2 -- "ERROR: order に書かれていないステップがあります: ${f:t}"
+      print -ru2 -- "       実行する順に ${slug} を order へ足してください（実行しないなら .sh を外す）"
+      bad=1
+    fi
+  done
+  (( bad )) && return 1
+
+  if (( ${#declared} == 0 )); then
+    print -ru2 -- "ERROR: ステップがありません: $order_file"
+    print -ru2 -- "       order に slug を 1 行 1 つ書き、同名の <slug>.sh を置いてください（例: network → network.sh）"
+    return 1
+  fi
+  _mr_order_slugs=("${declared[@]}")
+}
+
 _mr_discover() {
   if [[ ! -d $MYROUTINE_STEPS_DIR ]]; then
     print -ru2 -- "ERROR: ステップディレクトリがありません: $MYROUTINE_STEPS_DIR"
     return 1
   fi
-  _mr_step_files=($MYROUTINE_STEPS_DIR/[0-9]*.sh(N))
-  if (( ${#_mr_step_files} == 0 )); then
-    print -ru2 -- "ERROR: ステップがありません: $MYROUTINE_STEPS_DIR"
-    print -ru2 -- "       NN-name.sh 形式のファイルを置いてください（例: 10-network.sh）"
-    return 1
-  fi
-  local f="" meta="" slug=""
-  local -a seen_slugs=()
+  _mr_read_order || return 1
+  _mr_step_files=()
+  local slug=""
+  for slug in $_mr_order_slugs; do
+    _mr_step_files+=("$MYROUTINE_STEPS_DIR/${slug}.sh")
+  done
+  local f="" meta=""
   for f in $_mr_step_files; do
     meta=$(_mr_read_meta "$f") || return 1
     local -a parts=("${(@s:	:)meta}")
@@ -529,23 +617,7 @@ _mr_discover() {
     _mr_step_parallel+=("${parts[7]:-false}")
     _mr_step_disabled+=("${parts[8]:-}")
     _mr_step_interactive+=("${parts[9]:-false}")
-    slug=$(_mr_slug_of "$f")
-    # slug は action id の前置に使われ、履歴ではカンマ区切りで並ぶ。
-    # 区切り文字が混ざると連続日数・NEW・解消の追跡が壊れる。
-    # slug は action id に "<slug>.<id>" の形で前置される。slug 自身がドットを
-    # 含むと id からの復元（最初のドットまで）が壊れ、連続日数・NEW・解消の
-    # 判定対象から漏れる。履歴の区切り文字も入れられない。
-    if [[ -z $slug || ! $slug =~ '^[A-Za-z0-9_-]+$' ]]; then
-      print -ru2 -- "ERROR: ステップ slug に使えるのは英数字と _ - だけです: ${slug} (${f:t})"
-      return 1
-    fi
-    if (( ${seen_slugs[(Ie)$slug]} )); then
-      print -ru2 -- "ERROR: ステップ slug が重複しています: ${slug} (${f:t})"
-      print -ru2 -- "       slug は要対応 id の前置に使うため一意である必要があります"
-      return 1
-    fi
-    seen_slugs+=("$slug")
-    _mr_step_slugs+=("$slug")
+    _mr_step_slugs+=("${_mr_order_slugs[$(( ${#_mr_step_slugs} + 1 ))]}")
   done
 
   # 進捗ヘッダー [n/N] は無効ステップを数えない。有効ステップだけに詰め直した
@@ -830,7 +902,7 @@ _mr_step_gate() {
     return 2
   fi
 
-  # 実行間隔 → skip（番号指定の実行は明示指定なので判定しない）
+  # 実行間隔 → skip（指定実行は明示指定なので判定しない）
   if (( _MR_FULL_RUN )); then
     local not_due=""
     if ! not_due=$(_mr_cadence_due "$n"); then
@@ -860,9 +932,11 @@ _mr_step_gate() {
 # 実行結果を分類して記録する。逐次・並列に共通の唯一の出口。
 # 戻り値 1 は critical の失敗（呼び出し側が全体の失敗として拾う）。
 _mr_step_finalize() {
-  local n=$1 rc=$2 ms=$3 timed_out=$4 limit=$5
+  local n=$1 rc=$2 ms=$3 timed_out=$4 limit=$5 ended=${6:-}
   local name=${_mr_step_names[$n]} slug=${_mr_step_slugs[$n]}
   local chan="$_MR_TMPDIR/chan.$n"
+  # 並列ではステップ自身の終了時刻が渡される。逐次はここが終了の瞬間。
+  _mr_result_ended[$n]=${ended:-$(_mr_hms_now)}
   _mr_drain "$chan"
 
   # --jsonl はステップ本体の生出力を stdout に出さない代わりに、当日ログへは
@@ -933,6 +1007,8 @@ _mr_run_step() {
     return 0
   fi
 
+  (( _MR_JSONL )) && _mr_jsonl_emit_start "$n"
+
   local chan="$_MR_TMPDIR/chan.$n"
   : > "$chan"
   local limit=$(_mr_step_timeout_of "$file")
@@ -995,8 +1071,8 @@ _mr_run_step() {
 # ─────────────────────────────────────────────────────────────────
 #
 # step_parallel=true のステップは、実行順で連続する範囲を 1 グループとして同時に
-# 実行する。グループは逐次ステップを跨がない。並び順はファイル名で決まるので、
-# どこで区切るかは番号付けだけで制御できる。
+# 実行する。グループは逐次ステップを跨がない。並び順は order で決まるので、
+# どこで区切るかは order の並びだけで制御できる。
 #
 # 親の配列（結果・要対応・評価済み slug）はサブシェルから変更できないため、
 # 背景に出すのは「実行」だけに限る。ゲートと記録は親で行い、出力はステップ単位に
@@ -1011,7 +1087,7 @@ _mr_exec_parallel() {
   local t0=$(_mr_now_ms) rc=0
   _MR_IN_PARALLEL=1
   _mr_run_with_timeout "$file" "$n" "$slug" "$chan" "$limit" || rc=$?
-  print -r -- "$rc"$'\t'"$(( $(_mr_now_ms) - t0 ))"$'\t'"${_mr_timed_out}"$'\t'"$limit" \
+  print -r -- "$rc"$'\t'"$(( $(_mr_now_ms) - t0 ))"$'\t'"${_mr_timed_out}"$'\t'"$limit"$'\t'"$(_mr_hms_now)" \
     > "$_MR_TMPDIR/res.$n"
 }
 
@@ -1037,6 +1113,9 @@ _mr_run_parallel_group() {
     while (( ${#running} < max && ${#pending} > 0 )); do
       n=${pending[1]}
       pending=(${pending[2,-1]})
+      # 実行に入る瞬間に流す。start は親（このシェル）から出す（背景のサブシェルは
+      # JSONL の書き込み先とイベントファイルを共有しないため、行が混ざらない）。
+      (( _MR_JSONL )) && _mr_jsonl_emit_start "$n"
       { _mr_exec_parallel "$n" } >> "$_MR_TMPDIR/out.$n" 2>&1 &
       running+=($!)
     done
@@ -1060,7 +1139,7 @@ _mr_run_parallel_group() {
     [[ -e "$_MR_TMPDIR/res.$n" ]] || continue
     local -a f=("${(@s:	:)$(<"$_MR_TMPDIR/res.$n")}")
     _mr_last_step_rc=${f[1]}
-    _mr_step_finalize "$n" "${f[1]}" "${f[2]}" "${f[3]}" "${f[4]}" || overall=1
+    _mr_step_finalize "$n" "${f[1]}" "${f[2]}" "${f[3]}" "${f[4]}" "${f[5]:-}" || overall=1
   done
   return $overall
 }
@@ -1083,7 +1162,7 @@ _mr_maybe_abort() {
 }
 
 # parallel と宣言されたステップが実行順で連続している範囲を探す。
-# 範囲外の番号は逐次側のエラー経路に任せる（グループにまとめない）。
+# 範囲外の添字は逐次側のエラー経路に任せる（グループにまとめない）。
 _mr_is_parallel() {
   local n=$1
   (( n >= 1 && n <= ${#_mr_step_files} )) || return 1
@@ -1091,7 +1170,7 @@ _mr_is_parallel() {
 }
 
 # step_disabled が非空のステップは実行せず、理由と disabled ステータスだけを記録する。
-# 全体実行では「居ない」ものとして扱い出力しない。番号指定実行（_MR_FULL_RUN=0）は
+# 全体実行では「居ない」ものとして扱い出力しない。指定実行（_MR_FULL_RUN=0）は
 # 明示指定を尊重し、なぜ実行しなかったかと戻し方を出す。
 _mr_handle_disabled() {
   local n=$1
@@ -1507,7 +1586,8 @@ _mr_summary_json() {
 # --jsonl イベント出力
 # ─────────────────────────────────────────────────────────────────
 #
-# run（開始直後）→ step（ステップ完了ごと）→ summary（最後）の順で 1 行ずつ流す。
+# run（開始直後）→ start（ステップが実行に入るごと）→ step（ステップ完了ごと）→
+# summary（最後）の順で 1 行ずつ流す。
 # 受け手はパイプの向こうで逐次描画する前提なので、行ごとに完結した JSON にし、
 # 都度 flush する（zsh は 1 コマンドの実行完了時に stdout を flush するため、
 # print を分けて呼ぶだけで実現できる。バッファリング目的で連結しないこと）。
@@ -1567,6 +1647,19 @@ _mr_jsonl_emit_run() {
   _mr_jsonl_write "$out"
 }
 
+# ステップが実行に入った（前提・間隔・破壊的確認のゲートを通った）ことを知らせる。
+# skip・無効のステップでは流れない。長いステップの間、画面が止まって見えないための行。
+_mr_jsonl_emit_start() {
+  local n=$1
+  local out="{\"ev\":\"start\""
+  out+=",\"n\":${n}"
+  [[ -n ${_MR_JSONL_POS_OF[$n]:-} ]] && out+=",\"pos\":${_MR_JSONL_POS_OF[$n]}"
+  out+=",\"name\":\"$(_mr_json_escape "${_mr_step_names[$n]}")\""
+  out+=",\"slug\":\"$(_mr_json_escape "${_mr_step_slugs[$n]}")\""
+  out+=",\"at\":\"$(_mr_hms_now)\"}"
+  _mr_jsonl_write "$out"
+}
+
 _mr_json_tail_array() {
   local n=$1 out="[" first=1 l=""
   if [[ -n ${_mr_result_tail[$n]:-} ]]; then
@@ -1591,6 +1684,7 @@ _mr_jsonl_emit_step() {
   out+=",\"status\":\"${st_status}\""
   out+=",\"rc\":${_mr_result_rc[$n]:-0}"
   out+=",\"duration_ms\":${_mr_result_ms[$n]:-0}"
+  out+=",\"ended_at\":\"${_mr_result_ended[$n]:-$(_mr_hms_now)}\""
   out+=",\"summary\":\"$(_mr_json_escape "${_mr_result_summary[$n]:-}")\""
   out+=",\"note\":\"$(_mr_json_escape "${_mr_result_note[$n]:-}")\""
   out+=",\"tail\":$(_mr_json_tail_array "$n")"
@@ -1639,7 +1733,7 @@ _mr_finish() {
 # ─────────────────────────────────────────────────────────────────
 
 _mr_show_list() {
-  print -r -- "${_MR_C_BOLD}myroutine ステップ一覧:${_MR_C_RESET}"
+  print -r -- "${_MR_C_BOLD}myroutine ステップ一覧（実行順 / 指定実行は slug: myroutine <slug>）:${_MR_C_RESET}"
   print -r -- "${_MR_C_DIM}  ${MYROUTINE_STEPS_DIR}${_MR_C_RESET}"
   local total=${#_mr_step_files} n=0 mark=""
   for (( n = 1; n <= total; n++ )); do
@@ -1654,34 +1748,43 @@ _mr_show_list() {
       [[ -n ${_mr_step_weekday[$n]} ]] && cad+="/${(k)_MR_WEEKDAYS[(r)${_mr_step_weekday[$n]}]}"
       mark+=" ${_MR_C_CYAN}(${cad})${_MR_C_RESET}"
     fi
-    print -r -- "  ${_MR_C_CYAN}${n}.${_MR_C_RESET} ${_mr_step_names[$n]}${mark}"
-    print -r -- "     ${_MR_C_DIM}${_mr_step_files[$n]:t}  slug=${_mr_step_slugs[$n]}${_MR_C_RESET}"
+    # 指定実行（myroutine <slug>）に使うのは slug なので、一番目立たせる。
+    print -r -- "  ${_MR_C_CYAN}${n}.${_MR_C_RESET} ${_MR_C_BOLD}${_mr_step_slugs[$n]}${_MR_C_RESET}  ${_mr_step_names[$n]}${mark}"
+    print -r -- "     ${_MR_C_DIM}${_mr_step_files[$n]:t}${_MR_C_RESET}"
     [[ -n ${_mr_step_disabled[$n]:-} ]] && print -r -- "     ${_MR_C_DIM}⊘ 無効: ${_mr_step_disabled[$n]}${_MR_C_RESET}"
   done
 }
 
 # ─────────────────────────────────────────────────────────────────
-# 引数解釈（ステップ番号）
+# 引数解釈（ステップ slug）
 # ─────────────────────────────────────────────────────────────────
 
-# 「1,3,5」「1 3 5」「1, 3」いずれも受ける。数値以外が混じればエラーにし、
-# 黙って読み飛ばすことはしない。
+# 「brew,omz」「brew omz」「brew, omz」いずれも受ける。slug で指定し、結果は
+# 内部の番号（_mr_step_files の添字）に直して返す。数字・存在しない slug は
+# 黙って読み飛ばさずエラーにする。discover 済みであること。
 _mr_parse_steps() {
   local -a raw=() out=()
-  local a="" n=""
+  local a="" w="" idx=0
   for a in "$@"; do
     raw+=(${(s:,:)${a//[[:space:]]/,}})
   done
-  for n in $raw; do
-    [[ -z $n ]] && continue
-    if [[ $n != <-> ]]; then
-      print -ru2 -- "ERROR: ステップ番号ではありません: $n"
+  for w in $raw; do
+    [[ -z $w ]] && continue
+    if [[ $w == <-> ]]; then
+      print -ru2 -- "ERROR: ステップは番号ではなく slug で指定してください: $w"
+      print -ru2 -- "       slug は myroutine ls で確認できます（例: myroutine brew,omz）"
       return 1
     fi
-    out+=($n)
+    idx=${_mr_step_slugs[(Ie)$w]}
+    if (( idx == 0 )); then
+      print -ru2 -- "ERROR: 存在しないステップです: $w"
+      print -ru2 -- "       slug は myroutine ls で確認できます"
+      return 1
+    fi
+    out+=($idx)
   done
   if (( ${#out} == 0 )); then
-    print -ru2 -- "ERROR: ステップ番号が指定されていません"
+    print -ru2 -- "ERROR: ステップが指定されていません"
     return 1
   fi
   print -r -- ${(j: :)out}

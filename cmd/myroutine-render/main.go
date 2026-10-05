@@ -59,6 +59,8 @@ func process(in io.Reader, out io.Writer, verbose bool, opt render.Options) {
 		switch ev.Ev {
 		case "run":
 			st.Run(*ev.Run)
+		case "start":
+			render.Render(out, []render.Block{st.Start(*ev.Start)}, opt)
 		case "step":
 			block := st.Step(*ev.Step)
 			if len(block.Lines) > 0 {

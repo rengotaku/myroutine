@@ -1,0 +1,8 @@
+# 実行順。1 行 1 slug（slug = ファイル名から .sh を除いたもの）。# 以降はコメント。
+# ファイルがあるのにここに無い / ここにあるのにファイルが無い slug はエラーになる。
+network          # 最初に疎通を確認する
+aws-sso-login
+disk-space
+repo-fetch
+cleanup
+brew-status
