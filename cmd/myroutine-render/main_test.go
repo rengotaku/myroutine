@@ -172,3 +172,26 @@ func TestColoredOutputVisibleWidthMatchesWidthOption(t *testing.T) {
 		}
 	}
 }
+
+// TestStartLineRenderedBeforeStep は start イベントが開始行として即座に
+// 出力され、終了行に終了時刻が付くことを確認する。
+func TestStartLineRenderedBeforeStep(t *testing.T) {
+	input := strings.Join([]string{
+		`{"ev":"run","mode":"all","started_at":"2026-10-05T08:30:00+09:00","total":2,"log":""}`,
+		`{"ev":"start","n":5,"pos":2,"name":"Brew Update","slug":"brew","at":"08:38:00"}`,
+		`{"ev":"step","n":5,"pos":2,"name":"Brew Update","slug":"brew","status":"ok","rc":0,"duration_ms":420000,"ended_at":"08:45:00","tail":[]}`,
+	}, "\n")
+
+	var out bytes.Buffer
+	process(strings.NewReader(input), &out, false, opt())
+	got := out.String()
+
+	startIdx := strings.Index(got, "▶ [2/2] Brew Update  開始 08:38")
+	endIdx := strings.Index(got, "✓ [2/2] Brew Update")
+	if startIdx < 0 || endIdx < 0 || startIdx > endIdx {
+		t.Fatalf("開始行 → 終了行の順で出るべき。got:\n%s", got)
+	}
+	if !strings.Contains(got, "（終了 08:45）") {
+		t.Fatalf("終了行に終了時刻が必要。got:\n%s", got)
+	}
+}

@@ -47,7 +47,7 @@ ln -s "$PWD/myroutine/bin/myroutine" ~/bin/myroutine   # PATH の通った場所
 mkdir -p ~/.config/myroutine/steps.d
 ```
 
-出力を整形する `myroutine-render` は別バイナリです。`--jsonl` をこれに繋ぐと、成功したステップが 1 行に畳まれ、skip がまとめて出ます（繋がなければ従来どおりの出力です）。
+出力を整形する `myroutine-render` は別バイナリです。`--jsonl` をこれに繋ぐと、実行に入ったステップは開始行（`▶ [5/24] Brew Update  開始 08:38`）が出て、終了行には終了時刻が付きます。成功したステップは 1 行に畳まれ、skip はまとめて出ます（繋がなければ従来どおりの出力です）。
 
 ```sh
 make -C myroutine install PREFIX=~/bin   # 上の ln -s と同じ、PATH の通った場所へ
@@ -59,7 +59,7 @@ myroutine --jsonl | myroutine-render
 ステップは同梱していません。`examples/steps.d/` を参考に自分で書きます。
 
 ```sh
-cp examples/steps.d/*.sh ~/.config/myroutine/steps.d/   # 動かしてみる場合
+cp examples/steps.d/* ~/.config/myroutine/steps.d/   # 動かしてみる場合（order も一緒にコピーする）
 ```
 
 ## 使い方
@@ -67,7 +67,7 @@ cp examples/steps.d/*.sh ~/.config/myroutine/steps.d/   # 動かしてみる場�
 ```
 myroutine                全ステップを順に実行
 myroutine ls             ステップ一覧を表示
-myroutine 1,3,5          指定したステップのみを指定順で実行
+myroutine brew,omz       指定した slug のステップのみを指定順で実行（slug は ls で確認）
 
   -n, --dry-run          副作用を実行せず、実行予定を表示する
   -y, --yes              確認プロンプトを自動承認する
@@ -78,11 +78,35 @@ myroutine 1,3,5          指定したステップのみを指定順で実行
 
 ## ステップの書き方
 
-`~/.config/myroutine/steps.d/` に `NN-name.sh` 形式で 1 ファイル 1 ステップ置きます。
-実行順はファイル名順で、**順序を変えたいときはファイルをリネームするだけ**です。
+`~/.config/myroutine/steps.d/` に `<slug>.sh` 形式で 1 ファイル 1 ステップ置きます。
+slug はファイル名から `.sh` を除いたものです（英数字と `_` `-` だけ。数字だけの名前と `ls` / `last` は使えません）。
+
+実行順は `steps.d/order` に 1 行 1 slug で書いた順です。`#` 以降はコメント、空行は無視します。
+**順序を変えたいときは `order` の行を入れ替えるだけ**で、ファイル名は変わりません。
+
+```
+# ~/.config/myroutine/steps.d/order
+network
+brew-update   # 週次の更新
+cleanup
+```
+
+次のどれも、黙って読み飛ばさずエラーで止まります。
+
+- ファイルがあるのに `order` に無い slug
+- `order` にあるのにファイルが無い slug
+- `order` 内の重複
+- `order` ファイル自体が無い
+
+旧形式（`NN-name.sh`）から移行するときは、ファイル名から `NN-` を外して `name.sh` にし、`order` に `name` を旧番号の順に書きます。
+slug は旧形式でも `NN-` を除いた名前だったので、こうすれば `last-run/<slug>` と要対応の履歴がそのまま引き継がれます。
+`NN-name` のまま `order` に書くと slug が変わり、週次・月次のステップが初回扱いで走り直します。
+
+指定実行は slug で行います（`myroutine brew-update`、`myroutine brew,omz`、`myroutine brew omz`）。
+数字を渡すとエラーになります。slug は `myroutine ls` で確認できます。
 
 ```zsh
-# ~/.config/myroutine/steps.d/50-brew-update.sh
+# ~/.config/myroutine/steps.d/brew-update.sh
 step_name="Brew Update"
 step_critical=true
 step_requires=(brew)
@@ -117,7 +141,7 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 | `step_timeout` | `600` | 秒。`0` で無制限 |
 | `step_cadence` | `daily` | `daily` / `weekly` / `biweekly` / `monthly`。前回成功日からの間隔が足りなければ失敗ではなく skip |
 | `step_cadence_weekday` | （なし） | `mon`..`sun` / `1`..`7`。指定すると「間隔を満たし、かつその曜日」のときだけ実行する |
-| `step_disabled` | 空文字列 | 非空文字列（無効化の理由）を入れると実行しない。番号指定でも実行しない。実行総数・ヘッダー番号から外れ、結果は `disabled` として記録され要対応の解消判定・連続日数・履歴に影響しない。`true`/`false` はエラーになる（bool ではなく理由の文字列） |
+| `step_disabled` | 空文字列 | 非空文字列（無効化の理由）を入れると実行しない。slug を指定しても実行しない。実行総数・ヘッダー番号から外れ、結果は `disabled` として記録され要対応の解消判定・連続日数・履歴に影響しない。`true`/`false` はエラーになる（bool ではなく理由の文字列） |
 
 ### 関数
 
@@ -163,7 +187,7 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 - **`step_cadence`** — 週次・月次のステップを「毎日走らせて中で日付を見る」形にしません。
   本体が前回成功日（`$MYROUTINE_LOG_DIR/last-run/<slug>`）を見て skip します。skip は
   「見ていない」側なので、要対応の解消判定と連続日数からも自動的に外れます。
-  番号を指定した実行（`myroutine 5`）は明示指定なので間隔判定をせず、
+  slug を指定した実行（`myroutine brew`）は明示指定なので間隔判定をせず、
   `--force-cadence` で全ステップの間隔判定を無視できます
 
 ## 可視化のしくみ
@@ -178,7 +202,7 @@ id に含めないでください。** 含めると毎回別物として扱わ�
 
 skip・失敗・タイムアウトしたステップの要対応は「今回出なかった」のではなく
 「見ていない」ものとして扱い、解消判定と連続日数の対象から外します。
-ステップのファイル名（`NN-` を除いた部分）にはドットを使えません
+ステップの slug（ファイル名の `.sh` を除いた部分）にはドットを使えません
 （`<slug>.<id>` から slug を一意に復元するため）。
 
 ## 設定

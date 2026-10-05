@@ -13,6 +13,16 @@ type RunEvent struct {
 	Log       string `json:"log"`
 }
 
+// StartEvent はステップが実行に入ったことを表す。skip・無効・間隔外など
+// 実行に入らないステップでは流れない。
+type StartEvent struct {
+	N    int    `json:"n"`
+	Pos  int    `json:"pos"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+	At   string `json:"at"` // HH:MM:SS
+}
+
 // StepEvent は1ステップの結果を表す。
 type StepEvent struct {
 	N          int      `json:"n"`
@@ -28,6 +38,8 @@ type StepEvent struct {
 	// ステップ）で数えた通し番号。N（ステップ固有番号）とは分母が異なるため
 	// 別フィールド。古い（pos を持たない）入力では 0 のまま届く。
 	Pos int `json:"pos"`
+	// EndedAt はステップの終了時刻（HH:MM:SS）。古い入力では空。
+	EndedAt string `json:"ended_at"`
 }
 
 // ActionItem は要対応（放置すると困る）項目。
@@ -76,6 +88,7 @@ type SummaryEvent struct {
 type Event struct {
 	Ev      string
 	Run     *RunEvent
+	Start   *StartEvent
 	Step    *StepEvent
 	Summary *SummaryEvent
 }
@@ -101,6 +114,12 @@ func Parse(line []byte) (Event, error) {
 			return Event{}, err
 		}
 		ev.Run = &r
+	case "start":
+		var s StartEvent
+		if err := json.Unmarshal(line, &s); err != nil {
+			return Event{}, err
+		}
+		ev.Start = &s
 	case "step":
 		var s StepEvent
 		if err := json.Unmarshal(line, &s); err != nil {

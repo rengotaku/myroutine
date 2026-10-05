@@ -17,6 +17,7 @@ const (
 	iconOK   = "✓"
 	iconFail = "✗"
 	iconSkip = "⊘"
+	iconRun  = "▶"
 
 	nameCol = 32 // ステップ名 + summary を揃える表示幅
 
@@ -59,6 +60,28 @@ func NewState(verbose bool) *State {
 func (s *State) Run(r eventlog.RunEvent) {
 	s.total = r.Total
 	s.log = r.Log
+}
+
+// Start は start イベントを処理し、開始行の Block を返す。開始行は追記のみで
+// 後から書き換えない（ログの再描画でも崩れないようにするため）。
+func (s *State) Start(st eventlog.StartEvent) render.Block {
+	pos := st.Pos
+	if pos == 0 {
+		pos = st.N
+	}
+	label := fmt.Sprintf("%s [%d/%d] %s", iconRun, pos, s.total, st.Name)
+	if t := hhmm(st.At); t != "" {
+		label += "  開始 " + t
+	}
+	return render.Block{Lines: []render.Line{{Kind: render.KindText, Indent: 2, Text: label}}}
+}
+
+// hhmm は "HH:MM:SS" の先頭 "HH:MM" を返す。形式が違えば空を返す。
+func hhmm(at string) string {
+	if len(at) < 5 || at[2] != ':' {
+		return ""
+	}
+	return at[:5]
 }
 
 // Step は step イベントを処理し、即座に描画すべき Block を返す。
@@ -129,6 +152,11 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 		if st.RC != 0 {
 			right = right + "  rc=" + strconv.Itoa(st.RC)
 		}
+	}
+
+	// ended_at を持たない古い入力（myroutine last の保存済み JSONL）には付けない。
+	if t := hhmm(st.EndedAt); t != "" {
+		right = right + "  （終了 " + t + "）"
 	}
 
 	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label, Right: right, IconLen: iconRuneLen, IconStyle: iconStyle}}

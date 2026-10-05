@@ -9,18 +9,20 @@ myroutine の構成と、どこを触れば何が変わるか。
 ```
 myroutine (bin/myroutine)          ← FW。この 1 ファイルで完結する
   │
-  ├─ 探索      steps.d/NN-*.sh をファイル名順に読み、番号を導出する
+  ├─ 探索      steps.d/order の宣言順にステップ（<slug>.sh）を読み、位置を番号にする
+  │            order とファイルの食い違い・重複はエラーで止める。指定実行は slug
   ├─ 実行      1 ステップ = 1 サブシェル。タイムアウト監視付き
   │            step_parallel の連続範囲は 1 グループとして同時に実行する
   │            step_disabled が非空のステップは実行総数から外れ「居ない」扱いになる
   ├─ 集約      ステップからの報告を fd 3 経由で受け取る
   ├─ 分析      履歴と突き合わせて連続日数・NEW・解消を出す
-  └─ 出力      人間向けサマリ / --json / 日次ログ
+  └─ 出力      人間向けサマリ / --json / --jsonl（run → start → step → summary）/ 日次ログ
 
 $MYROUTINE_STEPS_DIR/              ← 利用者が書く。本体には同梱しない
-  10-network.sh
-  50-brew-update.sh
-  90-cleanup.sh
+  order                          ← 実行順（1 行 1 slug）
+  network.sh
+  brew-update.sh
+  cleanup.sh
 
 $MYROUTINE_LOG_DIR/
   YYYY-MM-DD.txt                   ← 人間可読な日次ログ（追記・ANSI 除去済み）
@@ -43,7 +45,7 @@ $MYROUTINE_LOG_DIR/
 ```
 main
  ├─ オプション解釈           --dry-run / --yes / --json / --timeout / --no-lock / --force-cadence
- ├─ _mr_discover             steps.d を走査し、各ファイルのメタデータを読む
+ ├─ _mr_discover             steps.d/order を読み、各ステップのメタデータを読む
  │    └─ _mr_read_meta       サブシェルで source。stdout は捨て、fd 4 でメタだけ取る
  ├─ _mr_acquire_lock         mkdir で排他。stale なら pid 生存確認のうえ回収
  └─ _mr_run_sequence
@@ -83,7 +85,7 @@ main
 ```
 
 ステップ番号は親が `_MR_STEP_NUM` として渡すので、ステップは自分の番号を意識しない。
-id には親が `_MR_STEP_SLUG`（ファイル名から `NN-` を除いた部分）を前置する。
+id には親が `_MR_STEP_SLUG`（ファイル名から `.sh` を除いた部分）を前置する。
 slug にドットを許さないのは、`<slug>.<id>` から slug を一意に復元するため。
 
 ## 状態ファイル
@@ -136,15 +138,16 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
 
 | やりたいこと | 触る場所 |
 |---|---|
-| ステップを追加する | `steps.d/` にファイルを置く（本体は触らない） |
-| ステップの順序を変える | ファイル名の `NN` を変える（本体も id も変わらない） |
+| ステップを追加する | `steps.d/` に `<slug>.sh` を置き、`order` に slug を足す（本体は触らない） |
+| ステップの順序を変える | `steps.d/order` の行を入れ替える（本体も id も変わらない） |
 | 出力の見た目を変える | `_mr_summary_human` / `ok` `warn` `err` `info` / `_mr_hdr` |
 | JSON の項目を増やす | `_mr_summary_json` |
+| `--jsonl` の項目を増やす | `_mr_jsonl_emit_start` / `_mr_jsonl_emit_step`、受け側は `internal/eventlog` と `internal/format` |
 | 滞留の強調しきい値 | `MYROUTINE_STREAK_WARN` |
 | 連続日数の数え方 | `_mr_analyze_history` / `_mr_history_days` |
 | ステップに渡すプリミティブを増やす | 「ステップに公開するプリミティブ」節に関数を足す |
 | ステップを並列で走らせる | 対象ステップに `step_parallel=true`。同時実行数は `MYROUTINE_PARALLEL_MAX` |
-| 並列グループの区切りを変える | ファイル名の `NN`（グループは実行順の連続範囲で決まる） |
+| 並列グループの区切りを変える | `order` の並び（グループは実行順の連続範囲で決まる） |
 | ステップを設定ごと無効化する | 対象ステップに `step_disabled="<理由>"` |
 
 ## 触るときに壊しやすいところ
@@ -187,7 +190,7 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
   症状で出る
 - **無効ステップの番号体系** — ヘッダーの `[n/N]` は `_mr_enabled_pos` / `_MR_ENABLED_TOTAL`
   （無効ステップを除いた位置と総数）を使うが、`myroutine ls` / 要対応 / `--json` の番号は
-  生のファイル順インデックス（`_mr_step_files` の添字）のまま。2 つの番号体系を混同すると
+  order 上の位置（`_mr_step_files` の添字）のまま。2 つの番号体系を混同すると
   ヘッダーの表示と一覧の番号が食い違って見える
 
 ## テスト

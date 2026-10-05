@@ -53,3 +53,26 @@ func TestParseSummary(t *testing.T) {
 		t.Fatalf("got %+v", ev.Summary.Resolved)
 	}
 }
+
+func TestParseStart(t *testing.T) {
+	ev, err := Parse([]byte(`{"ev":"start","n":5,"pos":4,"name":"Brew Update","slug":"brew","at":"08:38:12"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ev.Ev != "start" || ev.Start == nil {
+		t.Fatalf("got %+v", ev)
+	}
+	if ev.Start.N != 5 || ev.Start.Pos != 4 || ev.Start.Name != "Brew Update" || ev.Start.At != "08:38:12" {
+		t.Fatalf("got %+v", ev.Start)
+	}
+}
+
+func TestParseStepEndedAt(t *testing.T) {
+	ev, err := Parse([]byte(`{"ev":"step","n":1,"name":"a","slug":"a","status":"ok","rc":0,"duration_ms":1,"ended_at":"08:45:03"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ev.Step == nil || ev.Step.EndedAt != "08:45:03" {
+		t.Fatalf("got %+v", ev.Step)
+	}
+}
