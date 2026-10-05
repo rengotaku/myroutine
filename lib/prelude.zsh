@@ -4,8 +4,9 @@
 # 書き出されてから使われる。ステップの書き方とプリミティブの名前・挙動は zsh 版の
 # runner（bin/myroutine）と同じで、中身もそこから移したもの（ADR 0006）。
 #
-#   zsh prelude.zsh meta <step.sh>   ステップを source し、step_* の宣言を書き出す
-#   zsh prelude.zsh exec <step.sh>   ステップを source し、step_run（と step_verify）を実行する
+#   zsh prelude.zsh meta <step.sh>      ステップを source し、step_* の宣言を書き出す
+#   zsh prelude.zsh requires <step.sh>  ステップを source し、欠けている前提を書き出す（ゲート時点）
+#   zsh prelude.zsh exec <step.sh>      ステップを source し、step_run（と step_verify）を実行する
 #
 # 境界は「環境変数で渡し、fd 3 の行で返す」だけにする。ここから Go の側へ呼び戻す
 # 経路（ソケット、サブコマンド呼び出し）を足さないこと。
@@ -25,6 +26,10 @@
 #                      M<TAB>name<TAB>assoc
 #          E           E<TAB>0<TAB>source_failed
 #          D           D  （最後まで書けたことの印）
+#   requires:
+#          Q           Q<TAB>cmd<TAB>name / Q<TAB>path<TAB>path  （欠けている前提 1 つ）
+#          E           E<TAB>num<TAB>source_failed
+#          D           D
 #
 # 内部エラーは終了コードで伝えない（ステップ自身が 10 や 11 を返しうる）。E レコードで伝える。
 
@@ -155,11 +160,19 @@ confirm() {
     return 1
   fi
   (( _MR_YES )) && return 0
-  print -rn -- "  ${_MR_C_YELLOW}${_MR_C_BOLD}${msg} [y/N]:${_MR_C_RESET} "
-  local ans=""
+  local prompt="  ${_MR_C_YELLOW}${_MR_C_BOLD}${msg} [y/N]:${_MR_C_RESET} "
+  # stdout はファイル（ログ）につながっていて画面に出ない。問いは端末にも直接書く。
+  print -rn -- "$prompt"
+  local ans="" on_tty=0
   # /dev/tty が開けない環境ではリダイレクト自体がシェルのエラーになる。read の
   # stderr だけを潰しても漏れるため、ブロックごと黙らせたうえで中止側へ倒す。
-  { read -k 1 ans </dev/tty } 2>/dev/null || ans="n"
+  { print -rn -- "$prompt" >/dev/tty } 2>/dev/null && on_tty=1
+  if (( on_tty )); then
+    { read -k 1 ans </dev/tty } 2>/dev/null || ans="n"
+    { print -r -- "" >/dev/tty } 2>/dev/null
+  else
+    ans="n"
+  fi
   print -r -- ""
   [[ $ans == [yY] ]]
 }
@@ -210,6 +223,26 @@ _mr_prelude_meta() {
   print -r -- "D" >&3
 }
 
+# requires: ゲートの時点でステップを source してから前提を確かめる。ステップ内で
+# 定義した関数やトップレベルで足した PATH も、前のステップが入れたコマンドも見える。
+_mr_prelude_requires() {
+  local __mr_f=$1 __mr_c="" REPLY=""
+  step_requires=()
+  step_requires_path=()
+  source "$__mr_f" >/dev/null || { print -r -- "E"$'\t'"${_MR_STEP_NUM}"$'\t'"source_failed" >&3; return 0 }
+  for __mr_c in $step_requires; do
+    command -v "$__mr_c" >/dev/null 2>&1 && continue
+    _mr_esc "$__mr_c"
+    print -r -- "Q"$'\t'"cmd"$'\t'"$REPLY" >&3
+  done
+  for __mr_c in $step_requires_path; do
+    [[ -e $__mr_c ]] && continue
+    _mr_esc "$__mr_c"
+    print -r -- "Q"$'\t'"path"$'\t'"$REPLY" >&3
+  done
+  print -r -- "D" >&3
+}
+
 # exec: step_run と、あれば step_verify を実行する。
 # 終了コード: step_verify があればその rc、無ければ step_run の rc。
 _mr_prelude_exec() {
@@ -228,6 +261,7 @@ _mr_prelude_exec() {
 
 case $_mr_prelude_mode in
   meta) _mr_prelude_meta "$_mr_prelude_file"; exit 0 ;;
+  requires) _mr_prelude_requires "$_mr_prelude_file"; exit 0 ;;
   exec) _mr_prelude_exec "$_mr_prelude_file" ;;
   *)    print -ru2 -- "prelude: 不明なモード: ${_mr_prelude_mode}"; exit 2 ;;
 esac

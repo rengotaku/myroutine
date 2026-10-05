@@ -8,7 +8,6 @@ package runner
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -45,7 +44,7 @@ type Runner struct {
 	tty        *terminal
 	diag       *diag
 	stdout     *errWriter
-	displayErr io.Writer
+	displayErr *displayQueue
 	em         *emitter
 	log        *dailyLog
 	procs      *running
@@ -114,7 +113,7 @@ func Main(args []string) int {
 		runT0:   time.Now(),
 	}
 	r.stdout = &errWriter{w: os.Stdout}
-	r.displayErr = &lossyWriter{w: os.Stderr}
+	r.displayErr = newDisplayQueue(os.Stderr)
 	r.diag = &diag{w: r.displayErr, color: !cfg.NoColor && isTTY(os.Stderr)}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	r.watchSignals()
@@ -247,42 +246,16 @@ func (r *Runner) step(n int) *Step { return r.steps[n-1] }
 // 多重起動ロック
 // ─────────────────────────────────────────────────────────────────
 
-// acquireLock は zsh 版と同じ mkdir lock.d ＋ pid ＋ stale 回収の手順で排他する
-// （zsh 版と共存する間、新旧が互いを排他できるようにするため）。取れなければ中止する。
+// acquireLock は多重起動ロックを取る（中身は lock.go）。--no-lock なら取らない。
 func (r *Runner) acquireLock() bool {
 	if r.opt.NoLock {
 		return true
 	}
-	lock := filepath.Join(r.cfg.LogDir, "lock.d")
-	for attempt := 0; attempt < 2; attempt++ {
-		if err := os.Mkdir(lock, 0o755); err == nil {
-			_ = os.WriteFile(filepath.Join(lock, "pid"), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644)
-			r.lockDir = lock
-			return true
-		}
-		other := ""
-		if b, err := os.ReadFile(filepath.Join(lock, "pid")); err == nil {
-			other = trimSpace(string(b))
-		}
-		if other != "" && pidAlive(other) {
-			r.diag.line(fmt.Sprintf("ERROR: myroutine は既に実行中です (pid=%s)", other))
-			return false
-		}
-		// 単に削除すると、2 プロセスが同時に残留を検知したとき、片方が取り直した
-		// 新しいロックをもう片方が消してしまう。rename は原子的なので、退避に成功した
-		// 1 プロセスだけが回収する。
-		shown := other
-		if shown == "" {
-			shown = "unknown"
-		}
-		r.diag.line(fmt.Sprintf("警告: 残留ロックを回収します (pid=%s)", shown))
-		tomb := fmt.Sprintf("%s.stale.%d", lock, os.Getpid())
-		if err := os.Rename(lock, tomb); err == nil {
-			_ = os.RemoveAll(tomb)
-		}
+	dir, ok := acquireLockDir(filepath.Join(r.cfg.LogDir, "lock.d"), r.diag)
+	if ok {
+		r.lockDir = dir
 	}
-	r.diag.line("ERROR: ロックを取得できません: " + lock)
-	return false
+	return ok
 }
 
 func pidAlive(s string) bool {
@@ -376,12 +349,13 @@ func (r *Runner) finalCleanup() {
 		return
 	}
 	r.exited = true
+	r.displayErr.flush()
 	if r.em != nil && r.em.events != nil {
 		_ = r.em.events.Close()
 	}
 	r.log.close()
 	if r.lockDir != "" {
-		_ = os.RemoveAll(r.lockDir)
+		releaseLockDir(r.lockDir)
 	}
 	if r.tmpDir != "" {
 		_ = os.RemoveAll(r.tmpDir)
@@ -399,15 +373,24 @@ func (r *Runner) finalCleanup() {
 //	--jsonl  stdout = JSONL イベント、stderr = runner の進捗
 //	--json   stdout = 終了後に JSON を 1 個、stderr = レンダラと runner の進捗
 func (r *Runner) setupRunOutputs(label string, seq []int) error {
+	// 保存先を開けないまま走ると、出力も直近の記録も黙って失われる。
+	// ステップを始める前に止める（書き込み途中の失敗はここでは扱わない）。
 	now := time.Now()
-	r.log = openDailyLog(filepath.Join(r.cfg.LogDir, now.Format("2006-01-02")+".txt"))
+	logPath := filepath.Join(r.cfg.LogDir, now.Format("2006-01-02")+".txt")
+	log, err := openDailyLog(logPath)
+	if err != nil {
+		return fmt.Errorf("ERROR: 日次ログを開けません: %s (%v)", logPath, err)
+	}
+	eventsPath := filepath.Join(r.cfg.LogDir, "last-events.jsonl")
+	events, err := os.OpenFile(eventsPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		log.close()
+		return fmt.Errorf("ERROR: 直近の実行記録を開けません: %s (%v)", eventsPath, err)
+	}
+	r.log = log
 	_, _ = r.log.Write([]byte(fmt.Sprintf("=== myroutine %s %s ===\n", label, now.Format("2006-01-02 15:04:05"))))
 	r.diag.log = r.log
 
-	events, err := os.OpenFile(filepath.Join(r.cfg.LogDir, "last-events.jsonl"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		events = nil
-	}
 	r.em = &emitter{events: events, logSt: format.NewState(false), log: r.log}
 	switch {
 	case r.opt.JSONL:

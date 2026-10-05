@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/rengotaku/myroutine/internal/eventlog"
@@ -86,25 +87,93 @@ func (e *errWriter) failed() bool {
 	return e.err != nil
 }
 
-// lossyWriter は表示専用の書き込み先。失敗したら以後は書かない（表示先の障害で
-// runner やステップを止めない）。
-type lossyWriter struct {
-	w      io.Writer
-	mu     sync.Mutex
-	broken bool
+// displayQueueCap は表示待ちのチャンク数の上限。これを超えた分は捨てる。
+const displayQueueCap = 1024
+
+// displayFlushWait は終了時に、表示待ちを書き切るのを待つ上限。
+const displayFlushWait = time.Second
+
+// displayQueue は表示専用の書き込み先（stderr）。Write は容量制限付きのキューに
+// 積んで即座に戻り、実際の書き込みは専用の worker が行う。表示先が読まれない・
+// 詰まる・閉じる場合も、runner 本体（進捗・見出し・--json のレンダラ出力・
+// step_interactive の追随）は待たない。キューが満杯なら表示を捨てる
+// （ログ・イベント・ステップの進行には影響しない）。
+type displayQueue struct {
+	ch      chan []byte
+	idle    chan struct{}
+	mu      sync.Mutex
+	pending int
+	broken  bool
 }
 
-func (l *lossyWriter) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.broken {
+func newDisplayQueue(w io.Writer) *displayQueue {
+	q := &displayQueue{ch: make(chan []byte, displayQueueCap), idle: make(chan struct{}, 1)}
+	go q.worker(w)
+	return q
+}
+
+func (q *displayQueue) worker(w io.Writer) {
+	for b := range q.ch {
+		q.mu.Lock()
+		broken := q.broken
+		q.mu.Unlock()
+		if !broken {
+			if _, err := w.Write(b); err != nil {
+				q.mu.Lock()
+				q.broken = true
+				q.mu.Unlock()
+			}
+		}
+		q.mu.Lock()
+		q.pending--
+		empty := q.pending == 0
+		q.mu.Unlock()
+		if empty {
+			select {
+			case q.idle <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+func (q *displayQueue) Write(p []byte) (int, error) {
+	q.mu.Lock()
+	if q.broken {
+		q.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
-	n, err := l.w.Write(p)
-	if err != nil {
-		l.broken = true
+	q.pending++
+	q.mu.Unlock()
+	b := append([]byte(nil), p...)
+	select {
+	case q.ch <- b:
+	default:
+		// 満杯。表示を捨てる（書き込みは成功扱いにし、呼び出し側を止めない）
+		q.mu.Lock()
+		q.pending--
+		q.mu.Unlock()
 	}
-	return n, err
+	return len(p), nil
+}
+
+// flush は終了前に、表示待ちを書き切るのを上限つきで待つ。
+func (q *displayQueue) flush() {
+	deadline := time.After(displayFlushWait)
+	for {
+		q.mu.Lock()
+		done := q.pending == 0 || q.broken
+		q.mu.Unlock()
+		if done {
+			return
+		}
+		select {
+		case <-q.idle:
+		case <-deadline:
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 // dailyLog は $MYROUTINE_LOG_DIR/YYYY-MM-DD.txt。追記のみで、ANSI は除去して書く。
@@ -114,12 +183,12 @@ type dailyLog struct {
 	f    *os.File
 }
 
-func openDailyLog(path string) *dailyLog {
+func openDailyLog(path string) (*dailyLog, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
-		return &dailyLog{path: path}
+		return nil, err
 	}
-	return &dailyLog{path: path, f: f}
+	return &dailyLog{path: path, f: f}, nil
 }
 
 func (l *dailyLog) Write(p []byte) (int, error) {

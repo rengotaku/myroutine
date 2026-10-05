@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/rengotaku/myroutine/internal/eventlog"
@@ -124,6 +125,9 @@ func (r *Runner) runStep(s *Step) bool {
 	res := r.execStep(r.ctx, s, false)
 	r.lastRC = res.rc
 	if res.interrupted || r.interrupted() {
+		// 中断でも、そこまでの出力は日次ログに残す（一時ディレクトリは消える）。
+		// 結果の記録と履歴の更新はしない。
+		r.logStepOutput(s, true)
 		return false
 	}
 	return r.finalize(s, res)
@@ -168,29 +172,59 @@ func (r *Runner) gate(s *Step) gateResult {
 }
 
 // checkRequires は前提のうち欠けているものを「コマンド: x, パス: y」の形で返す。
-// コマンドの有無は zsh の command -v で見る（zsh 版と同じく組み込みも数える）。
+// ゲートの時点で prelude の requires モードがステップを source してから確かめる
+// （zsh 版と同じく、ステップ内で定義した関数・トップレベルで足した PATH・前の
+// ステップが入れたコマンドが見える）。結果は fd 3 で返る。
 func (r *Runner) checkRequires(s *Step) (string, error) {
-	var missing []string
-	if len(s.Requires) > 0 {
-		args := append([]string{"-f", "-c", `for c; do command -v -- "$c" >/dev/null 2>&1 || print -r -- "$c"; done`, "myroutine-requires"}, s.Requires...)
-		cmd := exec.CommandContext(r.ctx, r.zsh, args...)
-		cmd.WaitDelay = killGrace
-		out, err := cmd.Output()
-		if err != nil {
-			return "", err
-		}
-		for _, c := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-			if c != "" {
-				missing = append(missing, "コマンド: "+c)
+	if !s.HasRequires {
+		return "", nil
+	}
+	out, err := os.CreateTemp(r.tmpDir, "requires-*")
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+	cmd := exec.CommandContext(r.ctx, r.zsh, r.prelude, "requires", s.File)
+	cmd.Env = r.stepEnv(s.N, s.Slug, false)
+	cmd.Stderr = r.displayErr
+	cmd.ExtraFiles = []*os.File{out}
+	cmd.WaitDelay = killGrace
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		killTree(cmd.Process.Pid, cmd.Process.Pid)
+		return nil
+	}
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(out.Name())
+	if err != nil {
+		return "", err
+	}
+	var cmds, paths []string
+	done := false
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Split(line, "\t")
+		switch f[0] {
+		case "D":
+			done = true
+		case "E":
+			return "", fmt.Errorf("source failed")
+		case "Q":
+			if len(f) < 3 {
+				continue
+			}
+			if f[1] == "cmd" {
+				cmds = append(cmds, "コマンド: "+unescape(f[2]))
+			} else {
+				paths = append(paths, "パス: "+unescape(f[2]))
 			}
 		}
 	}
-	for _, p := range s.RequiresPath {
-		if _, err := os.Stat(p); err != nil {
-			missing = append(missing, "パス: "+p)
-		}
+	if !done {
+		return "", fmt.Errorf("requires check incomplete")
 	}
-	return strings.Join(missing, ", "), nil
+	return strings.Join(append(cmds, paths...), ", "), nil
 }
 
 // confirm は runner 自身の確認（破壊的ステップ・abort_on_fail）。判定順は zsh 版と同じ
@@ -228,22 +262,23 @@ func (r *Runner) finalize(s *Step, res execResult) bool {
 		}
 	}
 
-	out, _ := os.ReadFile(r.outPath(s.N))
-	_, _ = r.log.Write([]byte(fmt.Sprintf("\n── [%d] %s ──\n%s", s.N, s.Name, out)))
+	out := r.logStepOutput(s, false)
 	// 成功したステップの出力は保持しない（失敗時だけ末尾を tail として載せる）
-	if res.rc != 0 {
+	if res.rc != 0 || res.timedOut {
 		r.tails[s.N] = tailLines(string(out), 20)
 	}
 
 	failed := false
 	switch {
-	case res.rc == 0:
-		r.record(s, "ok", 0, res.ms, "", res.ended)
+	// タイムアウトは終了コードより先に見る。TERM を捕まえて 0 で終わるステップも
+	// 打ち切られたのであって、成功ではない（評価済みにも入れず、last-run も進めない）。
 	// 終了コードの値で内部事情を判別しない（ステップが同じ値を返しうる）
 	case res.timedOut:
 		r.diag.err(fmt.Sprintf("%s がタイムアウトしました (%ds)", s.Name, res.limit))
 		r.record(s, "timeout", res.rc, res.ms, fmt.Sprintf("%ds", res.limit), res.ended)
 		failed = true
+	case res.rc == 0:
+		r.record(s, "ok", 0, res.ms, "", res.ended)
 	case cr.sourceFailed:
 		r.diag.err("ステップの読み込みに失敗しました")
 		r.record(s, "fail", res.rc, res.ms, "source failed", res.ended)
@@ -272,6 +307,17 @@ func (r *Runner) finalize(s *Step, res execResult) bool {
 		return true
 	}
 	return false
+}
+
+// logStepOutput はステップの出力（out.N）を見出し付きで日次ログへ書き、中身を返す。
+func (r *Runner) logStepOutput(s *Step, interrupted bool) []byte {
+	out, _ := os.ReadFile(r.outPath(s.N))
+	head := fmt.Sprintf("\n── [%d] %s ──\n", s.N, s.Name)
+	if interrupted {
+		head = fmt.Sprintf("\n── [%d] %s（中断）──\n", s.N, s.Name)
+	}
+	_, _ = r.log.Write(append([]byte(head), out...))
+	return out
 }
 
 // tailLines は末尾 n 行を返す。空行は落とし、ANSI は除く。
@@ -379,6 +425,12 @@ func (r *Runner) runParallelGroup(group []*Step) bool {
 	}
 	wg.Wait()
 	if r.interrupted() {
+		// 中断でも、実行に入ったステップの出力は番号順に日次ログへ残す
+		for _, s := range group {
+			if _, ok := results[s.N]; ok {
+				r.logStepOutput(s, true)
+			}
+		}
 		return overall
 	}
 

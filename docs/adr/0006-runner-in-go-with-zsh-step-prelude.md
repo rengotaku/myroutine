@@ -48,7 +48,7 @@ ADR 0001 では Go 案を「技術的には有利」と認めたうえで、次�
   - `meta`: ステップを source し、`step_*` に当たる変数をすべて（未知のものも含めて）書き出す。`step_requires` / `step_requires_path` / `step_timeout` もここで一度に取る（今は 3 回に分けて source している）
   - `exec`: ステップを source し、`step_run` と、あれば `step_verify` を実行する。結果は今と同じく fd 3 に書く
 - 入力は環境変数で渡す（`MR_DRY_RUN` / `MR_YES` / `MR_IN_PARALLEL` / `MR_STEP_NUM` / `MR_STEP_SLUG`）。出力は fd 3 の行プロトコルのまま変えない
-- ステップの source は 4 回から 2 回（meta と exec）に減る
+- ステップの source は 4 回から 3 回（meta、ゲート時点の前提確認、exec）に減る。前提確認をゲート時点で行うのは、ステップ内で定義した関数・トップレベルで足した PATH・前のステップが入れたコマンドを、今と同じく前提として数えるため
 
 fd 3 のレコードは次の形に固定する。本文は今と同じく `%`→`%25`、改行→`%0A`、タブ→`%09` で符号化する。
 

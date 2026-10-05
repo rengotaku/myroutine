@@ -32,6 +32,9 @@ type Step struct {
 
 	Requires     []string
 	RequiresPath []string
+	// HasRequires は step_requires / step_requires_path のどちらかを宣言しているか。
+	// 宣言していればゲートの時点で requires モードを走らせる。
+	HasRequires bool
 	// Timeout は step_timeout。nil なら既定（--timeout / MYROUTINE_TIMEOUT）。
 	Timeout *int
 }
@@ -76,7 +79,7 @@ func (r *Runner) readMeta(n int, slug, file string) (*Step, bool) {
 	// 契約違反（トップレベルの出力）が結果を汚さないよう stdout は捨てる。
 	// stderr は zsh 版と同じく見せる（構文エラーの位置が出る）。
 	cmd.Stdout = nil
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = r.displayErr
 	cmd.ExtraFiles = []*os.File{out}
 	cmd.WaitDelay = 2 * time.Second
 	runErr := cmd.Run()
@@ -279,9 +282,11 @@ func validateMeta(n int, slug, file string, vars map[string]metaVar, d *diag) (*
 
 	if v, ok := vars["step_requires"]; ok {
 		s.Requires = v.listOf()
+		s.HasRequires = true
 	}
 	if v, ok := vars["step_requires_path"]; ok {
 		s.RequiresPath = v.listOf()
+		s.HasRequires = true
 	}
 	return s, true
 }

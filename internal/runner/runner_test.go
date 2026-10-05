@@ -297,3 +297,118 @@ func TestDescendants(t *testing.T) {
 		}
 	}
 }
+
+// blockingWriter は release されるまで Write を返さない（読まれない stderr の代わり）。
+type blockingWriter struct{ release chan struct{} }
+
+func (b *blockingWriter) Write(p []byte) (int, error) {
+	<-b.release
+	return len(p), nil
+}
+
+func TestDisplayQueueDoesNotBlock(t *testing.T) {
+	bw := &blockingWriter{release: make(chan struct{})}
+	q := newDisplayQueue(bw)
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < displayQueueCap*3; i++ {
+			_, _ = q.Write([]byte("line\n"))
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("表示先が詰まっていると Write が戻らない")
+	}
+	start := time.Now()
+	q.flush()
+	if time.Since(start) > displayFlushWait+500*time.Millisecond {
+		t.Errorf("flush が上限を超えて待った: %v", time.Since(start))
+	}
+	close(bw.release)
+}
+
+// 残留ロックがある状態で並行に取りに行っても、取れるのは高々 1 つ。
+func TestAcquireLockConcurrentReclaim(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		dir := t.TempDir()
+		lock := filepath.Join(dir, "lock.d")
+		if err := os.MkdirAll(lock, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(filepath.Join(lock, "pid"), []byte("999999\n"), 0o644)
+		const workers = 8
+		got := make(chan bool, workers)
+		start := make(chan struct{})
+		for i := 0; i < workers; i++ {
+			go func() {
+				d, _ := newDiag()
+				<-start
+				_, ok := acquireLockDir(lock, d)
+				got <- ok
+			}()
+		}
+		close(start)
+		n := 0
+		for i := 0; i < workers; i++ {
+			if <-got {
+				n++
+			}
+		}
+		if n > 1 {
+			t.Fatalf("round %d: %d 個が同時にロックを取った", round, n)
+		}
+		if _, err := os.Stat(lock + ".reclaim"); err == nil {
+			t.Fatalf("round %d: lock.d.reclaim が残った", round)
+		}
+	}
+}
+
+func TestLockFreshWithoutPidIsKept(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "lock.d")
+	_ = os.Mkdir(lock, 0o755)
+	d, buf := newDiag()
+	if _, ok := acquireLockDir(lock, d); ok {
+		t.Fatal("pid の無い新しいロックを回収した")
+	}
+	if !strings.Contains(buf.String(), "pid=unknown") {
+		t.Errorf("msg = %s", buf.String())
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Error("作成途中のロックを消した")
+	}
+}
+
+func TestStaleReclaimDirIsCleared(t *testing.T) {
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "lock.d")
+	_ = os.Mkdir(lock, 0o755)
+	_ = os.WriteFile(filepath.Join(lock, "pid"), []byte("999999\n"), 0o644)
+	rec := lock + ".reclaim"
+	_ = os.Mkdir(rec, 0o755)
+	old := time.Now().Add(-time.Hour)
+	_ = os.Chtimes(rec, old, old)
+	d, buf := newDiag()
+	got, ok := acquireLockDir(lock, d)
+	if !ok || got != lock {
+		t.Fatalf("古い lock.d.reclaim が残っていると取れない: %s", buf.String())
+	}
+	if _, err := os.Stat(rec); err == nil {
+		t.Error("lock.d.reclaim が残った")
+	}
+	releaseLockDir(lock)
+	if _, err := os.Stat(lock); err == nil {
+		t.Error("自分のロックを消せていない")
+	}
+}
+
+func TestReleaseLockKeepsOthers(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "lock.d")
+	_ = os.Mkdir(lock, 0o755)
+	_ = os.WriteFile(filepath.Join(lock, "pid"), []byte("999998\n"), 0o644)
+	releaseLockDir(lock)
+	if _, err := os.Stat(lock); err != nil {
+		t.Error("他人のロックを消した")
+	}
+}

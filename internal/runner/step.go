@@ -38,6 +38,10 @@ func (r *Runner) stepEnv(n int, slug string, inParallel bool) []string {
 		"MR_IN_PARALLEL="+b(inParallel),
 		"MR_STEP_NUM="+strconv.Itoa(n),
 		"MR_STEP_SLUG="+slug,
+		// --timeout で上書きした実効値を渡す（step_timeout=$MYROUTINE_TIMEOUT のように
+		// 既定値を参照するステップが、zsh 版と同じ値を見るように）。meta / requires /
+		// exec のすべてに同じ値が渡る。
+		"MYROUTINE_TIMEOUT="+strconv.Itoa(r.cfg.Timeout),
 	)
 	if r.opt.JSON || r.opt.JSONL {
 		env = append(env, "MR_NO_COLOR=1")

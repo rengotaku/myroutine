@@ -204,6 +204,7 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
 cmd/myroutine/main.go          ← 入口。runner.Main を呼ぶだけ
 internal/runner/
   options.go                   ← CLI と環境変数（MYROUTINE_*）の解釈
+  lock.go                      ← 多重起動ロック（取得・残留の回収・所有を確かめた解放）
   order.go                     ← steps.d/order の読み取りと食い違いの検出
   meta.go                      ← prelude の meta モードで宣言を取り、検証する
   runner.go                    ← 全体の流れ・ロック・シグナル・出力先の用意
@@ -222,17 +223,18 @@ internal/format, internal/render ← 人が読む出力（myroutine-render と�
 
 ### 境界: prelude
 
-Go の runner はステップを `zsh <prelude> meta|exec <step.sh>` の形で起動する。prelude は
+Go の runner はステップを `zsh <prelude> meta|requires|exec <step.sh>` の形で起動する。prelude は
 実行のたびに一時ディレクトリへ書き出す。プリミティブ（`ok` / `capture` / `confirm` /
 `run` / `add_action` …）は prelude の中にあり、zsh 版と同じ名前・挙動を持つ。
 
 | 向き | 経路 | 中身 |
 |---|---|---|
-| runner → ステップ | 環境変数 | `MR_DRY_RUN` / `MR_YES` / `MR_IN_PARALLEL` / `MR_STEP_NUM` / `MR_STEP_SLUG` / `MR_NO_COLOR`（prelude が `_MR_*` に移して消す） |
-| ステップ → runner | fd 3 | exec: `A` / `T` / `I` / `S` / `V` / `E`（ADR 0006 表1）。meta: `M`（宣言 1 つ）/ `E` / `D`（最後まで書けた印） |
+| runner → ステップ | 環境変数 | `MR_DRY_RUN` / `MR_YES` / `MR_IN_PARALLEL` / `MR_STEP_NUM` / `MR_STEP_SLUG` / `MR_NO_COLOR`（prelude が `_MR_*` に移して消す）、`MYROUTINE_TIMEOUT`（`--timeout` を反映した実効値） |
+| ステップ → runner | fd 3 | exec: `A` / `T` / `I` / `S` / `V` / `E`（ADR 0006 表1）。meta: `M`（宣言 1 つ）/ `E` / `D`（最後まで書けた印）。requires: `Q`（欠けている前提 1 つ）/ `E` / `D` |
 
-ステップの source は 2 回（meta と exec）。前提コマンドの有無はゲートの時点で
-`zsh -f -c 'command -v …'` で確かめる（前のステップが入れたコマンドも見えるように）。
+ステップの source は 3 回（meta、ゲート時点の requires、exec）。前提の有無は requires モードが
+ステップを source してから `command -v` / `-e` で確かめる（ステップ内の関数・トップレベルで足した PATH・
+前のステップが入れたコマンドが見えるように）。`confirm` は問いを stdout（ログ）と `/dev/tty` の両方に書く。
 
 ### 出力の出し分け
 
@@ -254,7 +256,14 @@ Go の runner はステップを `zsh <prelude> meta|exec <step.sh>` の形で�
   前景を渡したステップが端末からの Ctrl-C で落ちたら、runner への SIGINT と同じく全体を中断する
 - 並列ステップには前景を渡さない（並列中の `confirm` は端末を読まずに中止へ倒れる）
 - 停止は `ps` で子孫を列挙した集合とプロセスグループの両方へ TERM → 2 秒 → KILL
-- ロックは zsh 版と同じ `mkdir lock.d` ＋ pid ＋ stale 回収で、新旧が互いを排他する
+- タイムアウトは終了コードより先に判定する（TERM を捕まえて 0 で終わっても timeout）
+- 中断（シグナル）でも、実行に入ったステップの出力は日次ログへ書き出してから一時ディレクトリを消す。
+  結果の記録と履歴の更新はしない
+- 日次ログと `last-events.jsonl` を開けなければ、ステップを始める前にエラーで止まる
+- ロックは zsh 版と同じ `mkdir lock.d` ＋ pid で、新旧が互いを排他する（`lock.go`）。回収は Go 版だけ慎重にしている:
+  pid の無いロックは作成直後とみなして待ち、3 秒以上古いときだけ残留扱いにする。回収は `mkdir lock.d.reclaim` を
+  取った 1 プロセスだけが、pid を読み直して判定が変わっていないことを確かめてから行う。終了時は
+  `lock.d/pid` が自分の pid のときだけ `lock.d` を消す
 
 ### Go 版で触るときに壊しやすいところ
 
@@ -265,6 +274,8 @@ Go の runner はステップを `zsh <prelude> meta|exec <step.sh>` の形で�
   親シェルが端末を読めなくなる
 - **SIGTTOU の無視は `setForeground` の間だけ** — 無視したままにすると以後の子へ SIG_IGN が
   引き継がれる。ハンドラ（Notify）にすると tcsetpgrp が再開され続けて戻らない
+- **stderr への書き込みは `displayQueue` を通す** — 容量制限付きのキューと専用 worker で書き、
+  満杯なら表示を捨てる。runner 本体が実 stderr へ直接書くと、読まれない stderr で全体が止まる
 - **SIGPIPE は Notify で受ける** — `signal.Ignore` にすると子に SIG_IGN が引き継がれ、
   ステップの外部コマンドが閉じたパイプで終われなくなる
 
