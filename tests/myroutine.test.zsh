@@ -2150,14 +2150,6 @@ step_run() { print -r -- SEQ-MARK; touch \"$MR_TD/started-a\"; touch \"$MR_TD/st
   "$MR" --no-lock </dev/null >/dev/null 2>&1 &
   local p=$! w=0
   until [[ -e "$MR_TD/started-a" && -e "$MR_TD/started-b" ]] || (( w >= 50 )); do sleep 0.1; (( w++ )); done
-  # zsh 版は実行中の出力を tee → sed で非同期に日次ログへ流す。マーカーがログに届く前に
-  # TERM を送ると tee/sed ごと落ちて失われ、遅い CI でだけ落ちる。zsh 版で見たいのは
-  # 「後片付けでログを消さないこと」なので、届くのを待ってから止める。
-  # Go 版は out.N にしか無い出力を中断時に書き出せるかを見るので、待たない。
-  if (( ! MR_GO )); then
-    w=0
-    until grep -qF -- MARK "$(mr_logfile)" 2>/dev/null || (( w >= 50 )); do sleep 0.1; (( w++ )); done
-  fi
   kill -TERM $p 2>/dev/null
   wait $p 2>/dev/null
   local log=$(cat -- "$(mr_logfile)" 2>/dev/null)
@@ -2170,8 +2162,11 @@ step_run() { print -r -- SEQ-MARK; touch \"$MR_TD/started-a\"; touch \"$MR_TD/st
   if [[ ! -s "$MYROUTINE_LOG_DIR/history.tsv" ]]; then pass "$label: 履歴は更新しない"
   else fail "$label: 履歴は更新しない" "$(cat -- "$MYROUTINE_LOG_DIR/history.tsv")"; fi
 }
-interrupt_keeps_log sequential "中断（逐次）"
-# zsh 版は並列グループの出力をグループの終了後にまとめて流すため、中断で失われる（Go 版で直した挙動）
+# zsh 版は Go 版だけで流す（どちらも Go 版で直した挙動）:
+# - 逐次: 出力を tee → sed でログへ流す。ファイル向けの sed はブロック単位でバッファし、中断時は
+#   子孫をまとめて TERM するため、sed が tee より先に死ぬと直前の出力が失われる（macOS の CI で再現）
+# - 並列: グループの出力をグループの終了後にまとめて流すため、中断で失われる
+(( MR_GO )) && interrupt_keeps_log sequential "中断（逐次）"
 (( MR_GO )) && interrupt_keeps_log parallel "中断（並列）"
 
 # ─────────────────────────────────────────────────────────────────
