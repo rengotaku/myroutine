@@ -572,7 +572,14 @@ _mr_read_order() {
     slug=${${f:t}%.sh}
     if (( ! ${declared[(Ie)$slug]} )); then
       print -ru2 -- "ERROR: order に書かれていないステップがあります: ${f:t}"
-      print -ru2 -- "       実行する順に ${slug} を order へ足してください（実行しないなら .sh を外す）"
+      if [[ $slug =~ '^[0-9]+-(.+)$' ]]; then
+        # 旧形式（NN-name.sh）。NN- 付きのまま order に足すと slug が変わり、
+        # last-run/<slug> と要対応 id の前置が引き継がれなくなる。
+        print -ru2 -- "       旧形式のファイル名です。${match[1]}.sh に名前を変え、order に ${match[1]} を足してください"
+        print -ru2 -- "       （${slug} のまま足すと slug が変わり、実行間隔の記録と要対応の履歴が引き継がれません）"
+      else
+        print -ru2 -- "       実行する順に ${slug} を order へ足してください（実行しないなら .sh を外す）"
+      fi
       bad=1
     fi
   done

@@ -134,6 +134,17 @@ assert_contains "$out" "order に書かれていないステップがありま�
 assert_eq "$(mr_rc ls)" "1" "order に無い .sh は終了コード 1"
 assert_eq "$(mr_rc)" "1" "order に無い .sh では全体実行も止まる"
 
+# 旧形式（NN-name.sh）が残っている
+newenv
+mkstep 10-alpha.sh 'step_name="A"
+step_run() { : }'
+print -r -- 'step_name="D"
+step_run() { : }' > "$MYROUTINE_STEPS_DIR/50-delta.sh"
+print -l alpha > "$MYROUTINE_STEPS_DIR/order"
+out=$(mr ls)
+assert_contains "$out" "delta.sh に名前を変え、order に delta を足してください" "order: 旧形式のファイル名には NN- を外す rename を案内する"
+assert_not_contains "$out" "実行する順に 50-delta を order へ足して" "order: 旧形式に NN- 付きの slug を案内しない"
+
 # order にあるがファイルが無い
 print -l alpha bravo ghost > "$MYROUTINE_STEPS_DIR/order"
 out=$(mr ls)

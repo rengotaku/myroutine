@@ -98,6 +98,10 @@ cleanup
 - `order` 内の重複
 - `order` ファイル自体が無い
 
+旧形式（`NN-name.sh`）から移行するときは、ファイル名から `NN-` を外して `name.sh` にし、`order` に `name` を旧番号の順に書きます。
+slug は旧形式でも `NN-` を除いた名前だったので、こうすれば `last-run/<slug>` と要対応の履歴がそのまま引き継がれます。
+`NN-name` のまま `order` に書くと slug が変わり、週次・月次のステップが初回扱いで走り直します。
+
 指定実行は slug で行います（`myroutine brew-update`、`myroutine brew,omz`、`myroutine brew omz`）。
 数字を渡すとエラーになります。slug は `myroutine ls` で確認できます。
 
