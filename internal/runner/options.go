@@ -33,6 +33,9 @@ type Config struct {
 	// NowEpoch は MYROUTINE_NOW_EPOCH（間隔判定用の擬似時計）。nil なら現在時刻。
 	NowEpoch *int64
 	NoColor  bool
+	// SummaryCheck は成功ステップの一言の検査（ADR 0007）。MYROUTINE_SUMMARY_CHECK=0 で切る
+	// （一言を出さない仮のステップを大量に使う統合テスト向け）。
+	SummaryCheck bool
 }
 
 // usageError は使い方の誤り。メッセージを出して終了コード 1 で終わる。
@@ -117,6 +120,8 @@ func loadConfig(o Options) (Config, error) {
 		StepsDir: envOr("MYROUTINE_STEPS_DIR", filepath.Join(envOr("XDG_CONFIG_HOME", filepath.Join(home, ".config")), "myroutine", "steps.d")),
 		LogDir:   envOr("MYROUTINE_LOG_DIR", filepath.Join(envOr("XDG_STATE_HOME", filepath.Join(home, ".local", "state")), "myroutine")),
 		NoColor:  os.Getenv("NO_COLOR") != "",
+
+		SummaryCheck: os.Getenv("MYROUTINE_SUMMARY_CHECK") != "0",
 	}
 
 	t, err := strconv.Atoi(envOr("MYROUTINE_TIMEOUT", "600"))

@@ -174,7 +174,7 @@ func TestColoredOutputVisibleWidthMatchesWidthOption(t *testing.T) {
 }
 
 // TestStartLineRenderedBeforeStep は start イベントが開始行として即座に
-// 出力され、終了行に終了時刻が付くことを確認する。
+// 出力され、終了行には終了時刻を付けないことを確認する。
 func TestStartLineRenderedBeforeStep(t *testing.T) {
 	input := strings.Join([]string{
 		`{"ev":"run","mode":"all","started_at":"2026-10-05T08:30:00+09:00","total":2,"log":""}`,
@@ -191,7 +191,7 @@ func TestStartLineRenderedBeforeStep(t *testing.T) {
 	if startIdx < 0 || endIdx < 0 || startIdx > endIdx {
 		t.Fatalf("開始行 → 終了行の順で出るべき。got:\n%s", got)
 	}
-	if !strings.Contains(got, "終了 08:45") {
-		t.Fatalf("終了行に終了時刻が必要。got:\n%s", got)
+	if strings.Contains(got, "終了 08:45") {
+		t.Fatalf("終了行に終了時刻を出してはいけない。got:\n%s", got)
 	}
 }

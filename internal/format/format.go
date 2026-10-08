@@ -97,8 +97,12 @@ func isFailStatus(status string) bool {
 func (s *State) Step(st eventlog.StepEvent) render.Block {
 	switch st.Status {
 	case "skip":
-		s.pendingSkip = append(s.pendingSkip, st)
-		return render.Block{}
+		// 実行間隔による skip は途中に出さず、末尾の「今日は対象外」にまとめる。
+		// それ以外（前提不足・見送り）はその場で結果行として出す。
+		if isCadenceSkip(st) {
+			s.pendingSkip = append(s.pendingSkip, st)
+			return render.Block{}
+		}
 	case "disabled":
 		// disabled は summary イベントの Disabled 一覧（「⊘ 無効」ブロック）
 		// だけで出す。ここで即時描画すると同じステップが二重に出る。
@@ -107,61 +111,45 @@ func (s *State) Step(st eventlog.StepEvent) render.Block {
 	return render.Block{Lines: s.stepLines(st)}
 }
 
+func isCadenceSkip(st eventlog.StepEvent) bool {
+	return strings.HasPrefix(st.Note, "cadence: ")
+}
+
+// stepLines は結果行を組み立てる。書式は状態によらず
+// 「記号 [位置/全件] 名前  一言  所要時間」の 1 つに揃える。一言は成功なら
+// ステップの emit_summary、失敗と skip なら runner の記録（status / rc / note）から作る。
 func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
-	icon := iconOK
-	iconStyle := render.StyleOK
-	if isFailStatus(st.Status) {
-		icon = iconFail
-		iconStyle = render.StyleFail
+	icon, iconStyle := iconOK, render.StyleOK
+	switch {
+	case isFailStatus(st.Status):
+		icon, iconStyle = iconFail, render.StyleFail
+	case st.Status == "skip":
+		icon, iconStyle = iconSkip, render.StyleSkip
 	}
 
-	nameAndSummary := st.Name
-	if st.Summary != "" {
-		// Pad は列幅より長い名前をそのまま返すので、詰める分が 0 になり名前と
-		// 要約がくっつく。名前側を切り詰めて、区切りの空白を必ず残す。
-		name := st.Name
-		if textwidth.Width(name) > nameCol-1 {
-			name = textwidth.Truncate(name, nameCol-1)
-		}
-		nameAndSummary = textwidth.Pad(name, nameCol) + st.Summary
-	}
-
-	// pos は run イベントの total と同じ集合（今回実行した無効化されていない
-	// ステップ）で数えた通し番号。n（ステップ固有番号）は要対応サマリの
-	// 「[3] ...」との対応付けに使うため、進捗表示にはこちらを使う。
-	// pos を持たない古い入力（0 のまま）では従来どおり n にフォールバックする。
+	// pos は run イベントの total と同じ集合で数えた通し番号。
+	// pos を持たない古い入力（0 のまま）では n にフォールバックする。
 	pos := st.Pos
 	if pos == 0 {
 		pos = st.N
 	}
 
-	label := fmt.Sprintf("%s [%d/%d] %s", icon, pos, s.total, nameAndSummary)
-	// 所要時間は右端に寄せず名前の直後に置く。右寄せだと短い名前の行で
-	// 名前と所要時間の間が大きく空き、どの行の数字か目で追いにくい。
-	right := formatDuration(st.DurationMs)
-	switch st.Status {
-	case "fail":
-		if st.RC != 0 {
-			right = right + "  rc=" + strconv.Itoa(st.RC)
-		}
-	case "timeout":
-		// rc だけでは通常の失敗と区別が付かない。制限秒数（note に
-		// "${limit}s" の形で入っている）を出してタイムアウトと分かるようにする。
-		right = right + "  timeout"
-		if st.Note != "" {
-			right = right + " " + st.Note
-		}
-		if st.RC != 0 {
-			right = right + "  rc=" + strconv.Itoa(st.RC)
-		}
+	// Pad は列幅より長い名前をそのまま返すので、詰める分が 0 になり名前と
+	// 一言がくっつく。名前側を切り詰めて、区切りの空白を必ず残す。
+	name := st.Name
+	if textwidth.Width(name) > nameCol-1 {
+		name = textwidth.Truncate(name, nameCol-1)
 	}
-
-	// ended_at を持たない古い入力（myroutine last の保存済み JSONL）には付けない。
-	if t := hhmm(st.EndedAt); t != "" {
-		right = right + "  終了 " + t
+	parts := []string{fmt.Sprintf("%s [%d/%d] %s", icon, pos, s.total, textwidth.Pad(name, nameCol))}
+	if w := resultWord(st); w != "" {
+		parts = append(parts, w)
 	}
-
-	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label + "  " + right, IconLen: iconRuneLen, IconStyle: iconStyle}}
+	// skip は実行していないので所要時間を出さない
+	if st.Status != "skip" {
+		parts = append(parts, formatDuration(st.DurationMs))
+	}
+	label := strings.TrimRight(strings.Join(parts, "  "), " ")
+	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label, IconLen: iconRuneLen, IconStyle: iconStyle}}
 
 	showTail := isFailStatus(st.Status) || (s.Verbose && len(st.Tail) > 0)
 	if showTail && len(st.Tail) > 0 {
@@ -179,33 +167,69 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 	return lines
 }
 
-// FlushSkips は溜めていた skip イベントを集約 Block として返す。summary
-// イベントを受け取ったとき、または stdin がそれ以前に閉じたときに呼ぶ。
-// 実行間隔による skip（今日は対象外）と、それ以外の skip（前提不足・見送り）は
-// 意味が違うので別の見出しに分ける。
+// resultWord は結果行の一言を返す。
+func resultWord(st eventlog.StepEvent) string {
+	switch st.Status {
+	case "fail":
+		if st.RC != 0 {
+			return "失敗（終了コード " + strconv.Itoa(st.RC) + "）"
+		}
+		return "失敗"
+	case "timeout":
+		// note は "${limit}s" の形で入っている
+		if sec, ok := strings.CutSuffix(st.Note, "s"); ok && sec != "" {
+			return "timeout（" + sec + " 秒）"
+		}
+		return "timeout"
+	case "skip":
+		return "skip（" + skipReason(st.Note) + "）"
+	}
+	// 一言を出さない成功ステップも、名前と所要時間だけの行にしない
+	if st.Summary == "" {
+		return "要約なし"
+	}
+	return st.Summary
+}
+
+// skipReason は skip の note（runner の記録）を画面向けの理由に直す。
+//
+//	"コマンド: tmux, パス: /x"  → "tmux・/x が無い"
+//	"declined (destructive)"    → "確認で N"
+//	"dry-run (destructive)"     → "dry-run"
+func skipReason(note string) string {
+	switch note {
+	case "declined (destructive)":
+		return "確認で N"
+	case "dry-run (destructive)":
+		return "dry-run"
+	}
+	var missing []string
+	for _, f := range strings.Split(note, ", ") {
+		v, ok := strings.CutPrefix(f, "コマンド: ")
+		if !ok {
+			v, ok = strings.CutPrefix(f, "パス: ")
+			v = shortenPath(v)
+		}
+		if !ok {
+			return note
+		}
+		missing = append(missing, v)
+	}
+	return strings.Join(missing, "・") + " が無い"
+}
+
+// FlushSkips は溜めていた実行間隔の skip を「今日は対象外」の Block として返す。
+// summary イベントを受け取ったとき、または stdin がそれ以前に閉じたときに呼ぶ。
+// それ以外の skip（前提不足・見送り）は Step がその場で結果行として出している。
 func (s *State) FlushSkips() render.Block {
 	if len(s.pendingSkip) == 0 {
 		return render.Block{}
 	}
-	var cadence, other []eventlog.StepEvent
-	for _, st := range s.pendingSkip {
-		if strings.HasPrefix(st.Note, "cadence: ") {
-			cadence = append(cadence, st)
-		} else {
-			other = append(other, st)
-		}
-	}
+	cadence := s.pendingSkip
 	s.pendingSkip = nil
 
-	var lines []render.Line
-	if len(cadence) > 0 {
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 今日は対象外 %d 件（実行間隔による skip）", iconSkip, len(cadence)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconSkip)})
-		lines = append(lines, skipRows(cadence, cadenceColumns)...)
-	}
-	if len(other) > 0 {
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s skip %d 件", iconSkip, len(other)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconSkip)})
-		lines = append(lines, skipRows(other, func(st eventlog.StepEvent) []string { return []string{st.Note} })...)
-	}
+	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 今日は対象外 %d 件（実行間隔による skip）", iconSkip, len(cadence)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconSkip)}}
+	lines = append(lines, skipRows(cadence, cadenceColumns)...)
 	return render.Block{Lines: lines}
 }
 

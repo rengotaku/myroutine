@@ -143,7 +143,7 @@ func (r *Runner) gate(s *Step) gateResult {
 		return gateErr
 	}
 	if missing != "" {
-		r.diag.dim("⊘ skip: " + s.Name + " — 前提が足りません（" + missing + "）")
+		// 画面にはレンダラが結果行「⊘ [位置/全件] 名前  skip（〇〇 が無い）」として出す
 		r.record(s, "skip", 0, 0, missing, "")
 		return gateSkip
 	}
@@ -158,13 +158,11 @@ func (r *Runner) gate(s *Step) gateResult {
 	}
 	if s.Destructive {
 		if r.opt.DryRun {
-			r.diag.dim("[dry-run] 破壊的ステップのため実行しません")
 			r.record(s, "skip", 0, 0, "dry-run (destructive)", "")
 			return gateSkip
 		}
 		// ステップ側が confirm を呼び忘れても本体が埋める
 		if !r.confirm("「" + s.Name + "」は破壊的な操作を含みます。実行しますか?") {
-			r.diag.dim("⊘ skip: " + s.Name + " — 実行を見送りました")
 			r.record(s, "skip", 0, 0, "declined (destructive)", "")
 			return gateSkip
 		}
@@ -279,6 +277,7 @@ func (r *Runner) finalize(s *Step, res execResult) bool {
 		r.record(s, "timeout", res.rc, res.ms, fmt.Sprintf("%ds", res.limit), res.ended)
 		failed = true
 	case res.rc == 0:
+		r.checkSummary(s)
 		r.record(s, "ok", 0, res.ms, "", res.ended)
 	case cr.sourceFailed:
 		r.diag.err("ステップの読み込みに失敗しました")

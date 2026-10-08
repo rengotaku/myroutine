@@ -71,6 +71,8 @@ newenv() {
   _TMPDIRS+=("$td")
   mkdir -p "$td/steps.d" "$td/log"
   export MYROUTINE_STEPS_DIR="$td/steps.d" MYROUTINE_LOG_DIR="$td/log"
+  # 仮のステップは一言（emit_summary）を出さないので、一言の検査は専用のテストでだけ有効にする
+  export MYROUTINE_SUMMARY_CHECK=0
   export MR_TD=$td
 }
 
@@ -440,11 +442,11 @@ mkstep 10-dest.sh 'step_name="破壊的"
 step_destructive=true
 step_run() { ok "実行された" }'
 out=$(mr --dry-run)
-assert_contains "$out" "破壊的ステップのため実行しません" "destructive: dry-run では実行しない"
+assert_contains "$out" "$(pick '破壊的ステップのため実行しません' 'skip（dry-run）')" "destructive: dry-run では実行しない"
 assert_not_contains "$out" "実行された"                   "destructive: dry-run で step_run が動かない"
 
 out=$(mr)
-assert_contains "$out" "実行を見送りました" "destructive: --yes 無し非対話では実行しない"
+assert_contains "$out" "$(pick '実行を見送りました' 'skip（確認で N）')" "destructive: --yes 無し非対話では実行しない"
 assert_not_contains "$out" "実行された"      "destructive: 確認できない環境で step_run が動かない"
 assert_eq "$(mr_rc)" "0" "destructive: 見送りは失敗ではない"
 
@@ -462,8 +464,8 @@ step_run() { err "実行されてしまった"; return 1 }'
 mkstep 20-after.sh 'step_name="後続"
 step_run() { ok "後続が実行された" }'
 out=$(mr)
-assert_contains "$out" "$(pick 'skip: 前提が足りません' '— 前提が足りません')"  "requires: 欠落時は skip になる"
-assert_contains "$out" "コマンド: this-command"  "requires: 欠けている前提を具体的に示す"
+assert_contains "$out" "$(pick 'skip: 前提が足りません' '⊘ [')"  "requires: 欠落時は skip になる"
+assert_contains "$out" "$(pick 'コマンド: this-command' 'skip（this-command-does-not-exist-9c3f が無い）')"  "requires: 欠けている前提を具体的に示す"
 assert_not_contains "$out" "実行されてしまった"  "requires: skip 時に step_run が動かない"
 assert_contains "$out" "後続が実行された"        "requires: skip でも後続は実行される"
 assert_eq "$(mr_rc)" "0" "requires: skip は終了コードに影響しない"
@@ -473,7 +475,7 @@ mkstep 10-reqpath.sh 'step_name="パス前提"
 step_requires_path=(/no/such/path/9c3f)
 step_run() { return 1 }'
 out=$(mr)
-assert_contains "$out" "パス: /no/such/path" "requires: パスの欠落も skip 理由に出る"
+assert_contains "$out" "$(pick 'パス: /no/such/path' 'skip（/no/such/path/9c3f が無い）')" "requires: パスの欠落も skip 理由に出る"
 
 # ─────────────────────────────────────────────────────────────────
 group "多重起動ロック"
@@ -1201,7 +1203,7 @@ mkstep 20-prun.sh 'step_name="走る方"
 step_parallel=true
 step_run() { ok ran }'
 out=$(mr)
-assert_contains "$out" "前提が足りません" "parallel: 前提不足の skip がグループ内で効く"
+assert_contains "$out" "$(pick '前提が足りません' 'が無い）')" "parallel: 前提不足の skip がグループ内で効く"
 assert_not_contains "$out" "never" "parallel: skip したステップは実行されない"
 assert_contains "$out" "ran" "parallel: skip は他方の実行を止めない"
 
@@ -2072,7 +2074,7 @@ path=(\"$MR_TD/bin\" \$path)
 step_requires=(mr-fake-tool-7c1)
 step_run() { touch \"$MR_TD/path-ran\" }"
 out=$(mr)
-assert_not_contains "$out" "前提が足りません" "requires: ステップ内の関数・PATH 追加を前提にしても skip しない"
+assert_not_contains "$out" "$(pick '前提が足りません' 'が無い）')" "requires: ステップ内の関数・PATH 追加を前提にしても skip しない"
 if [[ -e "$MR_TD/fn-ran" ]]; then pass "requires: ステップ内で定義した関数を前提として数える"
 else fail "requires: ステップ内で定義した関数を前提として数える" "$out"; fi
 if [[ -e "$MR_TD/path-ran" ]]; then pass "requires: トップレベルで足した PATH のコマンドを前提として数える"
@@ -2345,6 +2347,28 @@ assert_eq "$(mr_rc)" "1" "保存先: 書き込めないディレクトリでは�
 chmod 755 "$MYROUTINE_LOG_DIR"
 if [[ ! -e "$MR_TD/a-ran" ]]; then pass "保存先: 書き込めないディレクトリではステップを始めない"
 else fail "保存先: 書き込めないディレクトリではステップを始めない" "ステップが実行された"; fi
+fi
+
+# ─────────────────────────────────────────────────────────────────
+if (( MR_GO )); then
+group "一言の検査（ADR 0007。Go 版のみ）"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-good.sh 'step_name="良い一言"
+step_run() { emit_summary "3 件更新" }'
+mkstep 20-none.sh 'step_name="一言なし"
+step_run() { : }'
+mkstep 30-english.sh 'step_name="英語の一言"
+step_run() { emit_summary "clean" }'
+out=$(MYROUTINE_SUMMARY_CHECK=1 mr)
+assert_contains "$out" "3 件更新" "一言: 結果行に一言が出る"
+assert_contains "$out" "要約なし" "一言: 出さないステップは結果行に「要約なし」と出る"
+assert_contains "$out" "✗ 要対応 2 件" "一言: ルール違反は要対応に積まれる"
+assert_contains "$out" "一言なし の一言（emit_summary）を出していない — none.sh の emit_summary を直す" "一言: 一言が無いことを指摘する"
+assert_contains "$out" "英単語「clean」" "一言: 英単語を指摘する"
+assert_not_contains "$out" "良い一言 の一言" "一言: ルールどおりの一言は指摘しない"
+assert_eq "$(MYROUTINE_SUMMARY_CHECK=1 mr_rc)" "0" "一言: 違反しても終了コードは変えない"
 fi
 
 # ─────────────────────────────────────────────────────────────────

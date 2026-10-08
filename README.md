@@ -47,7 +47,7 @@ ln -s "$PWD/myroutine/bin/myroutine" ~/bin/myroutine   # PATH の通った場所
 mkdir -p ~/.config/myroutine/steps.d
 ```
 
-出力を整形する `myroutine-render` は別バイナリです。`--jsonl` をこれに繋ぐと、実行に入ったステップは開始行（`▶ [5/24] Brew Update  開始 08:38`）が出て、終了行には終了時刻が付きます。成功したステップは 1 行に畳まれ、skip はまとめて出ます（繋がなければ従来どおりの出力です）。
+出力を整形する `myroutine-render` は別バイナリです。`--jsonl` をこれに繋ぐと、実行に入ったステップは開始行（`▶ [5/24] Brew Update  開始 08:38`）が出ます。結果行は「記号 [位置/全件] 名前  一言  所要時間」の書式で、成功したステップは 1 行に畳まれ、実行間隔による skip は末尾の「今日は対象外」にまとめて出ます（繋がなければ従来どおりの出力です）。
 
 ```sh
 make -C myroutine install PREFIX=~/bin   # 上の ln -s と同じ、PATH の通った場所へ
@@ -135,10 +135,11 @@ step_requires=(brew)
 step_run() {
   local outdated=""
   capture outdated brew outdated --quiet || return 1
-  [[ -z $outdated ]] && { ok "全て最新"; return 0 }
+  [[ -z $outdated ]] && { emit_summary "更新なし"; return 0 }
 
   local -a pkgs=(${(f)outdated})
   run brew upgrade ${pkgs}
+  emit_summary "${#pkgs} 件更新"
   add_action outdated "${#pkgs} 件のパッケージを確認する"
 }
 
@@ -175,13 +176,36 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 
 | | |
 |---|---|
-| `ok` / `warn` / `err` / `info` | 出力ヘルパー |
+| `emit_summary "<一言>"` | 成功したときの結果行の一言（下の「結果行の書式」のルールに従う） |
+| `ok` / `warn` / `err` / `info` | 出力ヘルパー（本文。ログに残り、失敗時は末尾が画面に出る） |
 | `add_action <id> "<やること>"` | 要対応サマリに載る（劣化検知の対象） |
 | `add_todo <id> "<きょう回すもの>"` | ルーティンセクションに載る（劣化検知の対象外） |
 | `add_info <id> "<事後報告>"` | 情報セクションに載る |
 | `capture [-d 既定値] VAR cmd...` | コマンド失敗を検知できる形で出力を受け取る |
 | `confirm "<問い>"` | 確認プロンプト（tty 不在なら中止側へ倒れる） |
 | `run cmd...` | 副作用の実行（dry-run では実行しない） |
+
+### 結果行の書式
+
+結果行は状態によらず次の 1 つの書式で出ます（[ADR 0007](docs/adr/0007-uniform-result-line.md)）。
+
+```
+  ✓ [4/25] Worktree 同期                     25/25 同期（5 件更新）  21.6s
+  ✗ [3/25] Dotfiles 差分チェック＋同期       失敗（終了コード 1）  6.7s
+  ⊘ [19/25] 放置 tmux セッションの回収       skip（tmux が無い）
+```
+
+失敗と skip の一言は runner が作ります。ステップが書くのは**成功したときの一言だけ**で、
+次のルールに従います。
+
+- `emit_summary` を必ず呼ぶ。対象が 0 件で何もしなかったときも `対象なし` のように書く
+- 何がどうなったかを件数か状態で書く（`3 件更新` / `対象なし` / `差分なし`）
+- 「完了」「成功」「OK」は書かない（`✓` と同じことを言うだけになる）
+- 日本語で書く。英単語（3 文字以上）は使わない。`AWS` のような大文字だけの略語は可
+- 全角 20 文字（40 カラム）以内。詳しいことは本文の `ok` / `info` に書く
+
+ルールに反した成功ステップは、実行のたびに要対応に `<slug>.__summary` として積まれます
+（一言が無いときは結果行に `要約なし` と出ます）。dry-run では検査しません。
 
 > **ステップファイルはトップレベルで副作用を持たせないでください。**
 > 本体はメタデータの読み取りと実行で 2 回 source します。トップレベルに置いてよいのは
@@ -235,6 +259,7 @@ skip・失敗・タイムアウトしたステップの要対応は「今回出�
 | `MYROUTINE_TIMEOUT` | `600` |
 | `MYROUTINE_STREAK_WARN` | `3` |
 | `MYROUTINE_PARALLEL_MAX` | `4` |
+| `MYROUTINE_SUMMARY_CHECK` | 未設定（有効）。`0` で成功ステップの一言の検査を切る（Go 版のみ。テスト向け） |
 | `NO_COLOR` | 設定すると ANSI カラーを無効化 |
 
 ログは `$MYROUTINE_LOG_DIR/YYYY-MM-DD.txt` に**追記**されます（端末には色付き、
