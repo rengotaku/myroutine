@@ -140,7 +140,8 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 	if textwidth.Width(name) > nameCol-1 {
 		name = textwidth.Truncate(name, nameCol-1)
 	}
-	parts := []string{fmt.Sprintf("%s [%d/%d] %s", icon, pos, s.total, textwidth.Pad(name, nameCol))}
+	head := fmt.Sprintf("%s [%d/%d] ", icon, pos, s.total)
+	parts := []string{head + textwidth.Pad(name, nameCol)}
 	if w := resultWord(st); w != "" {
 		parts = append(parts, w)
 	}
@@ -149,7 +150,8 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 		parts = append(parts, formatDuration(st.DurationMs))
 	}
 	label := strings.TrimRight(strings.Join(parts, "  "), " ")
-	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label, IconLen: iconRuneLen, IconStyle: iconStyle}}
+	// 端末幅を超える行は切り捨てず折り返す（一言・skip の理由・所要時間を落とさない）
+	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label, IconLen: iconRuneLen, IconStyle: iconStyle, Wrap: true, HangIndent: textwidth.Width(head)}}
 
 	showTail := isFailStatus(st.Status) || (s.Verbose && len(st.Tail) > 0)
 	if showTail && len(st.Tail) > 0 {

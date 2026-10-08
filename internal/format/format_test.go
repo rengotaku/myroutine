@@ -285,3 +285,16 @@ func TestCadenceSkipsGatheredAndOtherSkipsShownInline(t *testing.T) {
 		t.Errorf("前提不足の skip がその場で出ていない。got:\n%s", inline)
 	}
 }
+
+// TestResultLineWrapsInsteadOfTruncating は 80 カラムでも一言と所要時間が
+// 切り捨てられず、折り返して残ることを確認する。
+func TestResultLineWrapsInsteadOfTruncating(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 25})
+	summary := strings.Repeat("あ", 19) + "い" // 40 カラム（上限ちょうど）
+	got := renderBlock(st.Step(eventlog.StepEvent{N: 1, Pos: 1, Name: "Worktree 同期", Status: "ok", Summary: summary, DurationMs: 1200}), 80, false)
+	flat := strings.ReplaceAll(strings.ReplaceAll(got, "\n", ""), " ", "")
+	if !strings.Contains(flat, "い1.2s") {
+		t.Fatalf("一言の末尾と所要時間が残っていない。got:\n%s", got)
+	}
+}

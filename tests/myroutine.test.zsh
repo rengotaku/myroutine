@@ -476,6 +476,7 @@ step_requires_path=(/no/such/path/9c3f)
 step_run() { return 1 }'
 out=$(mr)
 assert_contains "$out" "$(pick 'パス: /no/such/path' 'skip（/no/such/path/9c3f が無い）')" "requires: パスの欠落も skip 理由に出る"
+assert_contains "$(<$(mr_logfile))" "$(pick 'パス: /no/such/path' 'skip（/no/such/path/9c3f が無い）')" "requires: skip の理由が日次ログに残る"
 
 # ─────────────────────────────────────────────────────────────────
 group "多重起動ロック"

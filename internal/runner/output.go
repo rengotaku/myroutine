@@ -287,7 +287,11 @@ func (e *emitter) emit(ev string, payload any) error {
 			render.Render(e.rend.w, []render.Block{e.rend.st.Start(*p)}, e.rend.opt)
 		}
 	case *eventlog.StepEvent:
-		e.logSt.Step(*p)
+		// 前提不足・見送りの skip は実行前に止まるのでステップの出力が無い。結果行を
+		// 日次ログにも書き、何を・なぜ実行しなかったかを残す
+		if b := e.logSt.Step(*p); p.Status == "skip" && len(b.Lines) > 0 && e.log != nil {
+			render.Render(e.log, []render.Block{b}, render.Options{Width: 100})
+		}
 		if e.rend != nil {
 			if b := e.rend.st.Step(*p); len(b.Lines) > 0 {
 				render.Render(e.rend.w, []render.Block{b}, e.rend.opt)
