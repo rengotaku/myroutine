@@ -136,6 +136,8 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 	}
 
 	label := fmt.Sprintf("%s [%d/%d] %s", icon, pos, s.total, nameAndSummary)
+	// 所要時間は右端に寄せず名前の直後に置く。右寄せだと短い名前の行で
+	// 名前と所要時間の間が大きく空き、どの行の数字か目で追いにくい。
 	right := formatDuration(st.DurationMs)
 	switch st.Status {
 	case "fail":
@@ -156,10 +158,10 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 
 	// ended_at を持たない古い入力（myroutine last の保存済み JSONL）には付けない。
 	if t := hhmm(st.EndedAt); t != "" {
-		right = right + "  （終了 " + t + "）"
+		right = right + "  終了 " + t
 	}
 
-	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label, Right: right, IconLen: iconRuneLen, IconStyle: iconStyle}}
+	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label + "  " + right, IconLen: iconRuneLen, IconStyle: iconStyle}}
 
 	showTail := isFailStatus(st.Status) || (s.Verbose && len(st.Tail) > 0)
 	if showTail && len(st.Tail) > 0 {
@@ -179,21 +181,83 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 
 // FlushSkips は溜めていた skip イベントを集約 Block として返す。summary
 // イベントを受け取ったとき、または stdin がそれ以前に閉じたときに呼ぶ。
+// 実行間隔による skip（今日は対象外）と、それ以外の skip（前提不足・見送り）は
+// 意味が違うので別の見出しに分ける。
 func (s *State) FlushSkips() render.Block {
 	if len(s.pendingSkip) == 0 {
 		return render.Block{}
 	}
-	lines := []render.Line{
-		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s skip %d 件", iconSkip, len(s.pendingSkip)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconSkip)},
-	}
+	var cadence, other []eventlog.StepEvent
 	for _, st := range s.pendingSkip {
-		note := strings.TrimPrefix(st.Note, "cadence: ")
-		label := fmt.Sprintf("[%d] %s", st.N, textwidth.Pad(st.Name, nameCol)) + note
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: label, Dim: true, Wrap: true})
-		lines = append(lines, render.WrapText(note, 10)...)
+		if strings.HasPrefix(st.Note, "cadence: ") {
+			cadence = append(cadence, st)
+		} else {
+			other = append(other, st)
+		}
 	}
 	s.pendingSkip = nil
+
+	var lines []render.Line
+	if len(cadence) > 0 {
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 今日は対象外 %d 件（実行間隔による skip）", iconSkip, len(cadence)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconSkip)})
+		lines = append(lines, skipRows(cadence, cadenceColumns)...)
+	}
+	if len(other) > 0 {
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s skip %d 件", iconSkip, len(other)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconSkip)})
+		lines = append(lines, skipRows(other, func(st eventlog.StepEvent) []string { return []string{st.Note} })...)
+	}
 	return render.Block{Lines: lines}
+}
+
+// cadenceColumns は実行間隔 skip の行を「間隔 / 次回（前回）」の列に割る。
+// cadence を持たない古い入力では note をそのまま 1 列で出す。
+func cadenceColumns(st eventlog.StepEvent) []string {
+	if st.Cadence == "" {
+		return []string{strings.TrimPrefix(st.Note, "cadence: ")}
+	}
+	next := ""
+	if st.NextDue != "" {
+		next = "次回 " + st.NextDue
+	}
+	if st.LastRun != "" {
+		next += "（前回 " + st.LastRun + "）"
+	}
+	return []string{st.Cadence, next}
+}
+
+// skipRows は skip 一覧の行を組み立てる。番号・名前・各列の幅は一覧の中の
+// 最長に合わせる（固定幅だと長い名前が次の列とくっつく）。
+func skipRows(items []eventlog.StepEvent, cols func(eventlog.StepEvent) []string) []render.Line {
+	nums := make([]string, len(items))
+	cells := make([][]string, len(items))
+	numW, nameW := 0, 0
+	var colW []int
+	for i, st := range items {
+		nums[i] = fmt.Sprintf("[%d]", st.N)
+		numW = max(numW, textwidth.Width(nums[i]))
+		nameW = max(nameW, textwidth.Width(st.Name))
+		cells[i] = cols(st)
+		for j, c := range cells[i] {
+			if j >= len(colW) {
+				colW = append(colW, 0)
+			}
+			colW[j] = max(colW[j], textwidth.Width(c))
+		}
+	}
+	var lines []render.Line
+	for i, st := range items {
+		parts := []string{textwidth.Pad(nums[i], numW), textwidth.Pad(st.Name, nameW)}
+		for j, c := range cells[i] {
+			if j < len(cells[i])-1 {
+				c = textwidth.Pad(c, colW[j])
+			}
+			parts = append(parts, c)
+		}
+		label := strings.TrimRight(strings.Join(parts, "  "), " ")
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 6, Text: render.FirstLine(label), Dim: true, Wrap: true})
+		lines = append(lines, render.WrapText(st.Note, 10)...)
+	}
+	return lines
 }
 
 // Summary は summary イベントを処理し、集約ブロック群を返す。

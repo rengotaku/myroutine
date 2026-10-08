@@ -462,7 +462,7 @@ step_run() { err "実行されてしまった"; return 1 }'
 mkstep 20-after.sh 'step_name="後続"
 step_run() { ok "後続が実行された" }'
 out=$(mr)
-assert_contains "$out" "skip: 前提が足りません"  "requires: 欠落時は skip になる"
+assert_contains "$out" "$(pick 'skip: 前提が足りません' '— 前提が足りません')"  "requires: 欠落時は skip になる"
 assert_contains "$out" "コマンド: this-command"  "requires: 欠けている前提を具体的に示す"
 assert_not_contains "$out" "実行されてしまった"  "requires: skip 時に step_run が動かない"
 assert_contains "$out" "後続が実行された"        "requires: skip でも後続は実行される"
@@ -979,7 +979,8 @@ assert_contains "$out" "週次が走った" "cadence: 前回実行が無けれ�
 assert_eq "$(<$MYROUTINE_LOG_DIR/last-run/weekly)" "2026-08-19" "cadence: 成功したら前回実行日を記録する"
 
 out=$(MYROUTINE_NOW_EPOCH=$TUE mr)
-assert_contains "$out" "実行間隔を満たしていません" "cadence: 同日 2 回目は skip する"
+# Go 版は途中に出さず、末尾の「今日は対象外」一覧にまとめる
+assert_contains "$out" "$(pick '実行間隔を満たしていません' '今日は対象外 1 件')" "cadence: 同日 2 回目は skip する"
 assert_not_contains "$out" "週次が走った" "cadence: skip したステップは実行されない"
 
 stamp weekly 2026-08-12
@@ -1363,8 +1364,9 @@ step_run() { : }'
 mkstep 30-c.sh 'step_name="C"
 step_run() { ok C }'
 out=$(mr)
-assert_contains "$out" "[1/2] A" "disabled: 実行総数から無効ステップを除いて数える (1)"
-assert_contains "$out" "[2/2] C" "disabled: 実行総数から無効ステップを除いて数える (2)"
+# Go 版は無効も分母に数え、進捗の番号を末尾の一覧の [n] と揃える
+assert_contains "$out" "$(pick '[1/2] A' '[1/3] A')" "disabled: 実行総数の数え方 (1)"
+assert_contains "$out" "$(pick '[2/2] C' '[3/3] C')" "disabled: 実行総数の数え方 (2)"
 assert_not_contains "$out" "] 無効 ━" "disabled: 無効ステップのヘッダーは全体実行では出ない"
 
 newenv
@@ -1550,10 +1552,14 @@ step_disabled="jsonl pos 確認用"
 step_run() { : }'
 out=$(mr_stdout --jsonl)
 run_line=$(jsonl_line "$out" run)
-assert_contains "$run_line" '"total":1' "jsonl: run の total は無効ステップを含まない"
+assert_contains "$run_line" "$(pick '"total":1' '"total":2')" "jsonl: run の total の数え方（Go 版は無効を含む）"
 off_line=$(print -r -- "$out" | grep '"slug":"off"')
 assert_contains "$off_line" '"status":"disabled"' "jsonl: 無効ステップの status は disabled"
-assert_not_contains "$off_line" '"pos"' "jsonl: disabled ステップには pos を振らない（total の分母に含まれないため）"
+if (( MR_GO )); then
+  assert_contains "$off_line" '"pos":2' "jsonl: disabled ステップにも seq 上の pos を振る"
+else
+  assert_not_contains "$off_line" '"pos"' "jsonl: disabled ステップには pos を振らない（total の分母に含まれないため）"
+fi
 
 # 並列グループの後方が skip でも、先頭（実行するステップ）の pos は 1 になる。
 # ゲート判定は group 内を並び順で先に全部済ませるため、skip は自分のゲートで

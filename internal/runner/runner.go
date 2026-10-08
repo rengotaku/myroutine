@@ -63,6 +63,7 @@ type Runner struct {
 	todos   []item
 	infos   []item
 	summary map[int]string
+	cadence map[int]cadenceView // 実行間隔で skip したステップの表示用
 	tails   map[int][]string
 
 	evaluated []string
@@ -106,6 +107,7 @@ func Main(args []string) int {
 		procs:   newRunning(),
 		results: map[int]*result{},
 		summary: map[int]string{},
+		cadence: map[int]cadenceView{},
 		tails:   map[int][]string{},
 		streak:  map[string]int{},
 		newIDs:  map[string]bool{},
@@ -401,13 +403,11 @@ func (r *Runner) setupRunOutputs(label string, seq []int) error {
 		r.em.rend = newRenderSink(r.stdout, os.Stdout, r.cfg.NoColor)
 	}
 
-	// pos は今回の実行対象のうち無効化されていないステップに、実行順ではなく
-	// 「選択されたシーケンス上の位置」を先に割り当てたもの。並列グループは
-	// ゲート判定を先に済ませるため、発行順で振ると skip が先に番号を取ってしまう。
+	// pos は今回の実行対象に、実行順ではなく「選択されたシーケンス上の位置」を
+	// 先に割り当てたもの。並列グループはゲート判定を先に済ませるため、発行順で
+	// 振ると skip が先に番号を取ってしまう。無効なステップも数える: 全体実行で
+	// pos が末尾の skip・無効一覧の [n] と同じ番号になり、分母と食い違わない。
 	for _, n := range seq {
-		if r.step(n).Disabled != "" {
-			continue
-		}
 		r.total++
 		r.posOf[n] = r.total
 	}

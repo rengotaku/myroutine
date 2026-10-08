@@ -198,13 +198,14 @@ func TestStartLineFallsBackToNAndOmitsMissingTime(t *testing.T) {
 	}
 }
 
-func TestStepEndedAtShownInRightColumn(t *testing.T) {
+func TestStepEndedAtShownAfterName(t *testing.T) {
 	st := NewState(false)
 	st.Run(eventlog.RunEvent{Total: 2})
 
 	got := renderBlock(st.Step(eventlog.StepEvent{N: 1, Pos: 1, Name: "A", Status: "ok", DurationMs: 8100, EndedAt: "08:45:09"}), 100, false)
 
-	if !strings.Contains(got, "8.1s  （終了 08:45）") {
+	// 所要時間と終了時刻は右端に寄せず、名前の直後に続ける
+	if !strings.Contains(got, "[1/2] A  8.1s  終了 08:45") {
 		t.Fatalf("終了時刻が出ていない。got:\n%s", got)
 	}
 }
@@ -217,5 +218,27 @@ func TestStepWithoutEndedAtHasNoEndTime(t *testing.T) {
 
 	if strings.Contains(got, "終了") {
 		t.Fatalf("ended_at が無い古いイベントに終了時刻を付けてはいけない。got:\n%s", got)
+	}
+}
+
+func TestSkipsSplitByCadenceAndAligned(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 25})
+	st.Step(eventlog.StepEvent{N: 6, Name: "Brew Update", Status: "skip", Note: "cadence: weekly（月曜のみ）", Cadence: "weekly・月曜のみ", NextDue: "10-12"})
+	st.Step(eventlog.StepEvent{N: 15, Name: "外部出力ガード advisory の棚卸し", Status: "skip", Note: "cadence: weekly（前回 2026-09-30）", Cadence: "weekly", LastRun: "09-30", NextDue: "10-07"})
+	st.Step(eventlog.StepEvent{N: 9, Name: "Progress", Status: "skip", Note: "コマンド: claude"})
+
+	got := renderBlock(st.FlushSkips(), 120, false)
+
+	for _, want := range []string{
+		"今日は対象外 2 件（実行間隔による skip）",
+		"[6]   Brew Update                       weekly・月曜のみ  次回 10-12",
+		"[15]  外部出力ガード advisory の棚卸し  weekly            次回 10-07（前回 09-30）",
+		"skip 1 件",
+		"[9]  Progress  コマンド: claude",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q が無い。got:\n%s", want, got)
+		}
 	}
 }

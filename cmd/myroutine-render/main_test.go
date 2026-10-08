@@ -88,7 +88,7 @@ func TestNoSummaryFlushesPendingSkips(t *testing.T) {
 	process(strings.NewReader(input), &out, false, opt())
 
 	got := out.String()
-	if !strings.Contains(got, "skip 1 件") {
+	if !strings.Contains(got, "今日は対象外 1 件") {
 		t.Fatalf("expected pending skip to be flushed, got:\n%s", got)
 	}
 	if strings.Contains(got, "要対応") {
@@ -109,7 +109,7 @@ func TestSkipDeferredUntilSummaryOrEOF(t *testing.T) {
 	process(strings.NewReader(input), &out, false, opt())
 	got := out.String()
 
-	skipIdx := strings.Index(got, "skip 1 件")
+	skipIdx := strings.Index(got, "今日は対象外 1 件")
 	okIdx := strings.Index(got, "[2/0] b")
 	if skipIdx < 0 || okIdx < 0 {
 		t.Fatalf("expected both skip summary and step b in output, got:\n%s", got)
@@ -191,7 +191,7 @@ func TestStartLineRenderedBeforeStep(t *testing.T) {
 	if startIdx < 0 || endIdx < 0 || startIdx > endIdx {
 		t.Fatalf("開始行 → 終了行の順で出るべき。got:\n%s", got)
 	}
-	if !strings.Contains(got, "（終了 08:45）") {
+	if !strings.Contains(got, "終了 08:45") {
 		t.Fatalf("終了行に終了時刻が必要。got:\n%s", got)
 	}
 }

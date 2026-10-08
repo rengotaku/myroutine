@@ -412,3 +412,35 @@ func TestReleaseLockKeepsOthers(t *testing.T) {
 		t.Error("他人のロックを消した")
 	}
 }
+
+func TestCadenceSkipView(t *testing.T) {
+	tue := time.Date(2026, 10, 6, 9, 0, 0, 0, time.Local).Unix()
+	r := historyRunner(t)
+	r.cfg.NowEpoch = &tue
+	stamp := func(slug, day string) {
+		_ = os.MkdirAll(filepath.Join(r.cfg.LogDir, "last-run"), 0o755)
+		_ = os.WriteFile(r.stampFile(slug), []byte(day+"\n"), 0o644)
+	}
+	stamp("w", "2026-09-30")
+	stamp("m", "2026-10-01")
+	stamp("b", "2026-09-25")
+	stamp("mon", "2026-10-05")
+	cases := []struct {
+		step *Step
+		want cadenceView
+	}{
+		{&Step{Slug: "w", Cadence: "weekly"}, cadenceView{"weekly", "09-30", "10-07"}},
+		{&Step{Slug: "m", Cadence: "monthly"}, cadenceView{"monthly", "10-01", "11-01"}},
+		// 金曜のみ・隔週: 14 日後（10-09）が金曜なのでその日
+		{&Step{Slug: "b", Cadence: "biweekly", Weekday: 5}, cadenceView{"biweekly・金曜のみ", "09-25", "10-09"}},
+		// 月曜のみ・週次: 前回 10-05 の 7 日後 10-12（月曜）
+		{&Step{Slug: "mon", Cadence: "weekly", Weekday: 1}, cadenceView{"weekly・月曜のみ", "10-05", "10-12"}},
+		// 前回が無い曜日指定: 次の該当曜日
+		{&Step{Slug: "none", Cadence: "weekly", Weekday: 1}, cadenceView{"weekly・月曜のみ", "", "10-12"}},
+	}
+	for _, c := range cases {
+		if got := r.cadenceSkipView(c.step); got != c.want {
+			t.Errorf("%s: got %+v want %+v", c.step.Slug, got, c.want)
+		}
+	}
+}
