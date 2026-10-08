@@ -143,27 +143,26 @@ func (r *Runner) gate(s *Step) gateResult {
 		return gateErr
 	}
 	if missing != "" {
-		r.diag.dim("⊘ skip: 前提が足りません（" + missing + "）")
+		// 画面にはレンダラが結果行「⊘ [位置/全件] 名前  skip（〇〇 が無い）」として出す
 		r.record(s, "skip", 0, 0, missing, "")
 		return gateSkip
 	}
 	// 実行間隔は全体実行のときだけ見る（指定実行は明示指定なので判定しない）
 	if r.fullRun {
 		if due, why := r.cadenceDue(s); !due {
-			r.diag.dim("⊘ skip: 実行間隔を満たしていません（" + why + "）")
+			// 途中には出さない。末尾の「今日は対象外」一覧に名前と次回の日付つきで出る
+			r.cadence[s.N] = r.cadenceSkipView(s)
 			r.record(s, "skip", 0, 0, "cadence: "+why, "")
 			return gateSkip
 		}
 	}
 	if s.Destructive {
 		if r.opt.DryRun {
-			r.diag.dim("[dry-run] 破壊的ステップのため実行しません")
 			r.record(s, "skip", 0, 0, "dry-run (destructive)", "")
 			return gateSkip
 		}
 		// ステップ側が confirm を呼び忘れても本体が埋める
 		if !r.confirm("「" + s.Name + "」は破壊的な操作を含みます。実行しますか?") {
-			r.diag.dim("⊘ skip: 実行を見送りました")
 			r.record(s, "skip", 0, 0, "declined (destructive)", "")
 			return gateSkip
 		}
@@ -278,6 +277,7 @@ func (r *Runner) finalize(s *Step, res execResult) bool {
 		r.record(s, "timeout", res.rc, res.ms, fmt.Sprintf("%ds", res.limit), res.ended)
 		failed = true
 	case res.rc == 0:
+		r.checkSummary(s)
 		r.record(s, "ok", 0, res.ms, "", res.ended)
 	case cr.sourceFailed:
 		r.diag.err("ステップの読み込みに失敗しました")
@@ -358,10 +358,14 @@ func (r *Runner) record(s *Step, status string, rc int, ms int64, note, ended st
 	if tail == nil {
 		tail = []string{}
 	}
-	r.emit("step", &eventlog.StepEvent{
+	ev := &eventlog.StepEvent{
 		N: s.N, Name: s.Name, Slug: s.Slug, Status: status, RC: rc, DurationMs: ms,
 		Summary: r.summary[s.N], Note: note, Tail: tail, Pos: r.posOf[s.N], EndedAt: ended,
-	})
+	}
+	if c, ok := r.cadence[s.N]; ok && status == "skip" {
+		ev.Cadence, ev.LastRun, ev.NextDue = c.label, c.last, c.next
+	}
+	r.emit("step", ev)
 }
 
 func (r *Runner) startEvent(s *Step) *eventlog.StartEvent {

@@ -103,6 +103,56 @@ func (r *Runner) cadenceDue(s *Step) (bool, string) {
 	return false, fmt.Sprintf("%s（前回 %s）", s.Cadence, last)
 }
 
+// cadenceView は実行間隔で skip したステップを、人が読む形にしたもの。
+type cadenceView struct {
+	label string // "weekly" / "weekly・月曜のみ"
+	last  string // 前回成功日 MM-DD（無ければ空）
+	next  string // 次に実行される日 MM-DD（求められなければ空）
+}
+
+// cadenceSkipView は cadenceDue が skip と判定したステップについて、間隔の表記・
+// 前回成功日・次回の日付を返す。判定そのものは cadenceDue だけが持つ。
+func (r *Runner) cadenceSkipView(s *Step) cadenceView {
+	v := cadenceView{label: s.Cadence}
+	if s.Weekday != 0 {
+		v.label += "・" + weekdayJa[s.Weekday] + "曜のみ"
+	}
+	now := r.now()
+	today, _ := localMidnight(now.Format("2006-01-02"))
+	earliest := today.AddDate(0, 0, 1)
+
+	last := ""
+	if data, err := os.ReadFile(r.stampFile(s.Slug)); err == nil {
+		last = strings.Join(strings.Fields(string(data)), "")
+	}
+	if lastT, ok := localMidnight(last); last != "" && ok {
+		v.last = lastT.Format("01-02")
+		var due time.Time
+		switch s.Cadence {
+		case "daily":
+			due = lastT.AddDate(0, 0, 1)
+		case "weekly":
+			due = lastT.AddDate(0, 0, 7)
+		case "biweekly":
+			due = lastT.AddDate(0, 0, 14)
+		case "monthly":
+			due = time.Date(lastT.Year(), lastT.Month()+1, 1, 0, 0, 0, 0, time.Local)
+		default:
+			return v
+		}
+		if due.After(earliest) {
+			earliest = due
+		}
+	}
+	if s.Weekday != 0 {
+		for isoWeekday(earliest) != s.Weekday {
+			earliest = earliest.AddDate(0, 0, 1)
+		}
+	}
+	v.next = earliest.Format("01-02")
+	return v
+}
+
 // ─────────────────────────────────────────────────────────────────
 // 履歴と劣化検知
 // ─────────────────────────────────────────────────────────────────

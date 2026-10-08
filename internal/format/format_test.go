@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestTimeoutRendersAsFailure(t *testing.T) {
 	if strings.Contains(got, iconOK) {
 		t.Fatalf("timeout ステップに成功アイコンが混ざってはいけない。got:\n%s", got)
 	}
-	if !strings.Contains(got, "timeout 600s") {
+	if !strings.Contains(got, "timeout（600 秒）") {
 		t.Fatalf("note の制限秒数を活かしてタイムアウトと分かる表示にすべき。got:\n%s", got)
 	}
 	if !strings.Contains(got, "│ line 1") || !strings.Contains(got, "│ line 2") {
@@ -65,7 +66,7 @@ func TestTimeoutWithoutRCDoesNotShowStrayRC(t *testing.T) {
 	if strings.Contains(got, "rc=") {
 		t.Fatalf("rc=0 のときは rc= を出すべきではない。got:\n%s", got)
 	}
-	if !strings.Contains(got, "timeout 5s") {
+	if !strings.Contains(got, "timeout（5 秒）") {
 		t.Fatalf("rc が 0 でも timeout であることは表示すべき。got:\n%s", got)
 	}
 }
@@ -198,14 +199,52 @@ func TestStartLineFallsBackToNAndOmitsMissingTime(t *testing.T) {
 	}
 }
 
-func TestStepEndedAtShownInRightColumn(t *testing.T) {
+func TestStepEndTimeNotShown(t *testing.T) {
 	st := NewState(false)
 	st.Run(eventlog.RunEvent{Total: 2})
 
-	got := renderBlock(st.Step(eventlog.StepEvent{N: 1, Pos: 1, Name: "A", Status: "ok", DurationMs: 8100, EndedAt: "08:45:09"}), 100, false)
+	got := renderBlock(st.Step(eventlog.StepEvent{N: 1, Pos: 1, Name: "A", Status: "ok", Summary: "対象なし", DurationMs: 8100, EndedAt: "08:45:09"}), 100, false)
 
-	if !strings.Contains(got, "8.1s  （終了 08:45）") {
-		t.Fatalf("終了時刻が出ていない。got:\n%s", got)
+	// 終了時刻は「開始＋所要時間」で求まり、新しい情報が無いので出さない
+	if strings.Contains(got, "終了") {
+		t.Fatalf("終了時刻を出してはいけない。got:\n%s", got)
+	}
+	if !strings.Contains(got, "対象なし  8.1s") {
+		t.Fatalf("一言の直後に所要時間が続くべき。got:\n%s", got)
+	}
+}
+
+// TestResultLineFormatIsUniform は成功・失敗・skip の結果行が
+// 「記号 [位置/全件] 名前  一言  所要時間」の同じ書式で出ることを確認する。
+func TestResultLineFormatIsUniform(t *testing.T) {
+	cases := []struct {
+		ev   eventlog.StepEvent
+		want string
+	}{
+		{eventlog.StepEvent{N: 1, Pos: 1, Name: "A", Status: "ok", Summary: "3 件更新", DurationMs: 1200}, "✓ [1/9] A" + strings.Repeat(" ", 31) + "  3 件更新  1.2s"},
+		{eventlog.StepEvent{N: 2, Pos: 2, Name: "B", Status: "fail", RC: 2, DurationMs: 300}, "✗ [2/9] B" + strings.Repeat(" ", 31) + "  失敗（終了コード 2）  0.3s"},
+		{eventlog.StepEvent{N: 3, Pos: 3, Name: "C", Status: "skip", Note: "コマンド: tmux"}, "⊘ [3/9] C" + strings.Repeat(" ", 31) + "  skip（tmux が無い）"},
+		{eventlog.StepEvent{N: 4, Pos: 4, Name: "D", Status: "skip", Note: "コマンド: git, コマンド: zsh"}, "skip（git・zsh が無い）"},
+		{eventlog.StepEvent{N: 5, Pos: 5, Name: "E", Status: "skip", Note: "declined (destructive)"}, "skip（確認で N）"},
+		{eventlog.StepEvent{N: 6, Pos: 6, Name: "F", Status: "skip", Note: "dry-run (destructive)"}, "skip（dry-run）"},
+	}
+	for _, c := range cases {
+		st := NewState(false)
+		st.Run(eventlog.RunEvent{Total: 9})
+		got := renderBlock(st.Step(c.ev), 120, false)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%q が無い。got:\n%s", c.want, got)
+		}
+	}
+}
+
+func TestSkipReasonShortensHomePath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("HOME が取れない")
+	}
+	if got := skipReason("パス: " + home + "/.oh-my-zsh"); got != "~/.oh-my-zsh が無い" {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -217,5 +256,45 @@ func TestStepWithoutEndedAtHasNoEndTime(t *testing.T) {
 
 	if strings.Contains(got, "終了") {
 		t.Fatalf("ended_at が無い古いイベントに終了時刻を付けてはいけない。got:\n%s", got)
+	}
+}
+
+func TestCadenceSkipsGatheredAndOtherSkipsShownInline(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 25})
+	st.Step(eventlog.StepEvent{N: 6, Name: "Brew Update", Status: "skip", Note: "cadence: weekly（月曜のみ）", Cadence: "weekly・月曜のみ", NextDue: "10-12"})
+	st.Step(eventlog.StepEvent{N: 15, Name: "外部出力ガード advisory の棚卸し", Status: "skip", Note: "cadence: weekly（前回 2026-09-30）", Cadence: "weekly", LastRun: "09-30", NextDue: "10-07"})
+	inline := renderBlock(st.Step(eventlog.StepEvent{N: 9, Pos: 9, Name: "Progress", Status: "skip", Note: "コマンド: claude"}), 120, false)
+
+	got := renderBlock(st.FlushSkips(), 120, false)
+
+	for _, want := range []string{
+		"今日は対象外 2 件（実行間隔による skip）",
+		"[6]   Brew Update                       weekly・月曜のみ  次回 10-12",
+		"[15]  外部出力ガード advisory の棚卸し  weekly            次回 10-07（前回 09-30）",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q が無い。got:\n%s", want, got)
+		}
+	}
+	// 前提不足の skip は末尾にまとめず、その場で結果行として出す（二重に出さない）
+	if strings.Contains(got, "Progress") {
+		t.Errorf("前提不足の skip を末尾に出してはいけない。got:\n%s", got)
+	}
+	if !strings.Contains(inline, "⊘ [9/25] Progress") || !strings.Contains(inline, "skip（claude が無い）") {
+		t.Errorf("前提不足の skip がその場で出ていない。got:\n%s", inline)
+	}
+}
+
+// TestResultLineWrapsInsteadOfTruncating は 80 カラムでも一言と所要時間が
+// 切り捨てられず、折り返して残ることを確認する。
+func TestResultLineWrapsInsteadOfTruncating(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 25})
+	summary := strings.Repeat("あ", 19) + "い" // 40 カラム（上限ちょうど）
+	got := renderBlock(st.Step(eventlog.StepEvent{N: 1, Pos: 1, Name: "Worktree 同期", Status: "ok", Summary: summary, DurationMs: 1200}), 80, false)
+	flat := strings.ReplaceAll(strings.ReplaceAll(got, "\n", ""), " ", "")
+	if !strings.Contains(flat, "い1.2s") {
+		t.Fatalf("一言の末尾と所要時間が残っていない。got:\n%s", got)
 	}
 }

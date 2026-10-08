@@ -37,13 +37,17 @@ type StepEvent struct {
 	Summary    string   `json:"summary"`
 	Note       string   `json:"note"`
 	Tail       []string `json:"tail"`
-	// Pos は run イベントの total と同じ集合（今回の実行で無効化されていない
-	// ステップ）で数えた通し番号。N（ステップ固有番号）とは分母が異なるため
+	// Pos は run イベントの total と同じ集合（今回の実行対象。無効も含む）で
+	// 数えた通し番号。部分実行では N（ステップ固有番号）と分母が異なるため
 	// 別フィールド。古い（pos を持たない）入力では 0 のまま届く。
-	// disabled は total に含まれないので pos を持たない（書き出さない）。
 	Pos int `json:"pos,omitempty"`
 	// EndedAt はステップの終了時刻（HH:MM:SS）。古い入力では空。
 	EndedAt string `json:"ended_at"`
+	// 実行間隔で skip したときだけ入る。Cadence は "weekly・月曜のみ" の形、
+	// LastRun / NextDue は MM-DD。古い入力では空で、表示は Note に戻る。
+	Cadence string `json:"cadence,omitempty"`
+	LastRun string `json:"last_run,omitempty"`
+	NextDue string `json:"next_due,omitempty"`
 }
 
 // ActionItem は要対応（放置すると困る）項目。

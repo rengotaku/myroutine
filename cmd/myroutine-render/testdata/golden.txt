@@ -1,13 +1,13 @@
-  ✓ [1/19] AWS SSO Login                                                                        8.1s
-  ✗ [3/19] Dotfiles 差分チェック＋同期                                                    6.7s  rc=1
+  ✓ [1/19] AWS SSO Login                     要約なし  8.1s
+  ✗ [3/19] Dotfiles 差分チェック＋同期       失敗（終了コード 1）  6.7s
       │ === darwin_own ドリフト検査 ===
       │   1 件の意図しない差分があります。
       │ make: *** [diff-check] Error 1
       └ 全文: /Users/x/ot/rotine-log/2026-09-18.txt
-  ✓ [4/19] Worktree 同期                   24/24 (3 pulled)                                    41.2s
-  ⊘ skip 2 件
-      [5] Brew Update                     weekly（月曜のみ）
-      [9] Progress Report Reminder        前提が足りません
+  ✓ [4/19] Worktree 同期                     24/24 (3 pulled)  41.2s
+  ⊘ [9/19] Progress Report Reminder          skip（claude が無い）
+  ⊘ 今日は対象外 1 件（実行間隔による skip）
+      [5]  Brew Update  weekly（月曜のみ）
   ⊘ 無効 1 件
       [16] claude セッションと MCP プロセスの棚卸し
           2026-09-17: tmux 経由で claude を開かなくなり、棚卸しの対象が 0 件のため
