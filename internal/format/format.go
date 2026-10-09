@@ -495,6 +495,6 @@ func (s *State) tallyBlock() render.Block {
 	if len(s.failed) > 0 {
 		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 失敗 %d 件: %s", iconFail, len(s.failed), strings.Join(s.failed, ", ")), IconLen: iconRuneLen, IconStyle: styleForIcon(iconFail), Wrap: true, HangIndent: 2})
 	}
-	lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("成功 %d 件 / 失敗 %d 件 / skip %d 件 / 対象外 %d 件", c.ok, c.fail, c.skip, c.cadence), Dim: true})
+	lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("成功 %d 件 / 失敗 %d 件 / skip %d 件 / 対象外 %d 件", c.ok, c.fail, c.skip, c.cadence), Dim: true, Wrap: true, HangIndent: 2})
 	return render.Block{Lines: lines}
 }

@@ -380,3 +380,29 @@ func TestSummaryOmitsFailureLineWhenNoFailure(t *testing.T) {
 		t.Errorf("件数の行が無い:\n%s", got.String())
 	}
 }
+
+// 狭い端末でも件数の行を切り捨てずに折り返す。
+func TestSummaryCountsWrapOnNarrowTerminal(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 1})
+	st.Step(eventlog.StepEvent{N: 1, Name: "A", Status: "ok"})
+
+	var got strings.Builder
+	for _, b := range st.Summary(eventlog.SummaryEvent{}) {
+		got.WriteString(renderBlock(b, 40, false))
+	}
+	// 実行間隔の skip が無いので「今日は対象外」の行は出ない。「対象外 0 件」は件数の行にしか無い。
+	// 折り返しは語の途中でも起きるので、各行の前後の空白を落として連結してから探す
+	var joined strings.Builder
+	for _, l := range strings.Split(got.String(), "\n") {
+		joined.WriteString(strings.TrimSpace(l))
+	}
+	if !strings.Contains(joined.String(), "対象外 0 件") {
+		t.Errorf("幅 40 で対象外の件数が消えた:\n%s", got.String())
+	}
+	for _, l := range strings.Split(strings.TrimRight(got.String(), "\n"), "\n") {
+		if w := textwidth.Width(l); w > 40 {
+			t.Errorf("幅 40 を超える行がある（%d）: %q", w, l)
+		}
+	}
+}
