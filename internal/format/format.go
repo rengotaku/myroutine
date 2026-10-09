@@ -71,13 +71,14 @@ func (s *State) Start(st eventlog.StartEvent) render.Block {
 		pos = st.N
 	}
 	// 結果行と同じ名前列を使い、「開始」を結果行の一言と同じカラムから始める
-	_, col := nameColumn(iconRun, pos, s.total, st.Name)
+	head, col := nameColumn(iconRun, pos, s.total, st.Name)
 	parts := []string{col}
 	if t := hhmm(st.At); t != "" {
 		parts = append(parts, "開始 "+t)
 	}
 	label := strings.TrimRight(strings.Join(parts, colSep), " ")
-	return render.Block{Lines: []render.Line{{Kind: render.KindText, Indent: 2, Text: label}}}
+	// 名前列を広げたぶん狭い端末で開始時刻が切り捨てられないよう、結果行と同じく折り返す
+	return render.Block{Lines: []render.Line{{Kind: render.KindText, Indent: 2, Text: label, Wrap: true, HangIndent: textwidth.Width(head)}}}
 }
 
 // nameColumn は開始行と結果行に共通の「記号 [位置/全件] 名前」を、名前を

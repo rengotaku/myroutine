@@ -207,6 +207,23 @@ func TestStartWordAlignsWithResultWord(t *testing.T) {
 	}
 }
 
+// 名前列を固定幅にしても、狭い端末で開始時刻を切り捨てずに折り返す。
+func TestStartLineWrapsOnNarrowTerminal(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 24})
+
+	got := renderBlock(st.Start(eventlog.StartEvent{N: 7, Pos: 5, Name: "Brew Update", At: "08:38:41"}), 40, false)
+
+	if !strings.Contains(got, "開始 08:38") {
+		t.Fatalf("幅 40 で開始時刻が消えた: %q", got)
+	}
+	for _, l := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if w := textwidth.Width(l); w > 40 {
+			t.Errorf("幅 40 を超える行がある（%d）: %q", w, l)
+		}
+	}
+}
+
 func TestStartLineFallsBackToNAndOmitsMissingTime(t *testing.T) {
 	st := NewState(false)
 	st.Run(eventlog.RunEvent{Total: 3})
