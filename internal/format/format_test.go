@@ -8,6 +8,7 @@ import (
 
 	"github.com/rengotaku/myroutine/internal/eventlog"
 	"github.com/rengotaku/myroutine/internal/render"
+	"github.com/rengotaku/myroutine/internal/textwidth"
 )
 
 func renderBlock(b render.Block, width int, color bool) string {
@@ -182,9 +183,27 @@ func TestStartLine(t *testing.T) {
 
 	got := renderBlock(st.Start(eventlog.StartEvent{N: 7, Pos: 5, Name: "Brew Update", At: "08:38:41"}), 100, false)
 
-	want := "  ▶ [5/24] Brew Update  開始 08:38\n"
+	want := "  ▶ [5/24] Brew Update" + strings.Repeat(" ", nameCol-len("Brew Update")) + colSep + "開始 08:38\n"
 	if got != want {
 		t.Fatalf("開始行が違う。got %q want %q", got, want)
+	}
+}
+
+// 開始行の「開始」と結果行の一言は、名前の長さ（全角・列幅超えを含む）に
+// かかわらず同じカラムから始まる。
+func TestStartWordAlignsWithResultWord(t *testing.T) {
+	names := []string{"AWS SSO Login", "ネット疎通確認", "Dotfiles 差分チェック＋同期", "とても長いステップ名がここに入って列幅を超えるケース"}
+	for _, name := range names {
+		st := NewState(false)
+		st.Run(eventlog.RunEvent{Total: 23})
+		start := renderBlock(st.Start(eventlog.StartEvent{N: 3, Pos: 3, Name: name, At: "08:55:00"}), 200, false)
+		result := renderBlock(st.Step(eventlog.StepEvent{N: 3, Pos: 3, Name: name, Status: "ok", Summary: "問題なし", DurationMs: 1600}), 200, false)
+
+		startCol := textwidth.Width(start[:strings.Index(start, "開始")])
+		resultCol := textwidth.Width(result[:strings.Index(result, "問題なし")])
+		if startCol != resultCol {
+			t.Errorf("%q: 開始の位置 %d と一言の位置 %d がずれている\nstart:  %q\nresult: %q", name, startCol, resultCol, start, result)
+		}
 	}
 }
 
