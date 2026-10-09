@@ -334,3 +334,49 @@ func TestResultLineWrapsInsteadOfTruncating(t *testing.T) {
 		t.Fatalf("一言の末尾と所要時間が残っていない。got:\n%s", got)
 	}
 }
+
+// 末尾には、critical かどうかに関係なく失敗・timeout したステップ名と、
+// 状態ごとの件数が出る。
+func TestSummaryTalliesFailuresAndCounts(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 6})
+	for _, ev := range []eventlog.StepEvent{
+		{N: 1, Name: "A", Status: "ok"},
+		{N: 2, Name: "B", Status: "fail", RC: 1},
+		{N: 3, Name: "C", Status: "timeout"},
+		{N: 4, Name: "D", Status: "skip", Note: "tmux が無い"},
+		{N: 5, Name: "E", Status: "skip", Note: "cadence: weekly"},
+		{N: 6, Name: "F", Status: "disabled", Note: "reason"},
+	} {
+		st.Step(ev)
+	}
+
+	var got strings.Builder
+	for _, b := range st.Summary(eventlog.SummaryEvent{}) {
+		got.WriteString(renderBlock(b, 100, false))
+	}
+
+	for _, want := range []string{"✗ 失敗 2 件: B, C", "成功 1 件 / 失敗 2 件 / skip 1 件 / 対象外 1 件"} {
+		if !strings.Contains(got.String(), want) {
+			t.Errorf("末尾に %q が無い:\n%s", want, got.String())
+		}
+	}
+}
+
+// 失敗が無ければ失敗の行は出さず、件数の行だけを出す。
+func TestSummaryOmitsFailureLineWhenNoFailure(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 1})
+	st.Step(eventlog.StepEvent{N: 1, Name: "A", Status: "ok"})
+
+	var got strings.Builder
+	for _, b := range st.Summary(eventlog.SummaryEvent{}) {
+		got.WriteString(renderBlock(b, 100, false))
+	}
+	if strings.Contains(got.String(), "✗ 失敗") {
+		t.Errorf("失敗が無いのに失敗の行が出た:\n%s", got.String())
+	}
+	if !strings.Contains(got.String(), "成功 1 件 / 失敗 0 件 / skip 0 件 / 対象外 0 件") {
+		t.Errorf("件数の行が無い:\n%s", got.String())
+	}
+}
