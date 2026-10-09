@@ -186,7 +186,11 @@ func TestStartLineRenderedBeforeStep(t *testing.T) {
 	process(strings.NewReader(input), &out, false, opt())
 	got := out.String()
 
-	startIdx := strings.Index(got, "▶ [2/2] Brew Update  開始 08:38")
+	// 名前は列幅に揃えて空白が入るので、名前と開始時刻を別々に探す
+	startIdx := strings.Index(got, "▶ [2/2] Brew Update")
+	if !strings.Contains(got, "開始 08:38") {
+		t.Fatalf("開始行に開始時刻が無い。got:\n%s", got)
+	}
 	endIdx := strings.Index(got, "✓ [2/2] Brew Update")
 	if startIdx < 0 || endIdx < 0 || startIdx > endIdx {
 		t.Fatalf("開始行 → 終了行の順で出るべき。got:\n%s", got)

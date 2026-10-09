@@ -20,6 +20,7 @@ const (
 	iconRun  = "▶"
 
 	nameCol = 32 // ステップ名 + summary を揃える表示幅
+	colSep  = "  " // 名前列と次の語（一言・所要時間・開始時刻）の区切り
 
 	// iconRuneLen は iconOK / iconFail / iconSkip がいずれも 1 rune であることに
 	// 依存した定数。着色対象（先頭何 rune か）を render 側に伝えるのに使う。
@@ -69,11 +70,27 @@ func (s *State) Start(st eventlog.StartEvent) render.Block {
 	if pos == 0 {
 		pos = st.N
 	}
-	label := fmt.Sprintf("%s [%d/%d] %s", iconRun, pos, s.total, st.Name)
+	// 結果行と同じ名前列を使い、「開始」を結果行の一言と同じカラムから始める
+	head, col := nameColumn(iconRun, pos, s.total, st.Name)
+	parts := []string{col}
 	if t := hhmm(st.At); t != "" {
-		label += "  開始 " + t
+		parts = append(parts, "開始 "+t)
 	}
-	return render.Block{Lines: []render.Line{{Kind: render.KindText, Indent: 2, Text: label}}}
+	label := strings.TrimRight(strings.Join(parts, colSep), " ")
+	// 名前列を広げたぶん狭い端末で開始時刻が切り捨てられないよう、結果行と同じく折り返す
+	return render.Block{Lines: []render.Line{{Kind: render.KindText, Indent: 2, Text: label, Wrap: true, HangIndent: textwidth.Width(head)}}}
+}
+
+// nameColumn は開始行と結果行に共通の「記号 [位置/全件] 名前」を、名前を
+// nameCol に揃えた形で返す。head は名前より前の部分（折り返しのぶら下げ幅に使う）。
+// Pad は列幅より長い名前をそのまま返すので、詰める分が 0 になり名前と
+// 次の語がくっつく。名前側を切り詰めて、区切りの空白を必ず残す。
+func nameColumn(icon string, pos, total int, name string) (head, col string) {
+	if textwidth.Width(name) > nameCol-1 {
+		name = textwidth.Truncate(name, nameCol-1)
+	}
+	head = fmt.Sprintf("%s [%d/%d] ", icon, pos, total)
+	return head, head + textwidth.Pad(name, nameCol)
 }
 
 // hhmm は "HH:MM:SS" の先頭 "HH:MM" を返す。形式が違えば空を返す。
@@ -134,14 +151,8 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 		pos = st.N
 	}
 
-	// Pad は列幅より長い名前をそのまま返すので、詰める分が 0 になり名前と
-	// 一言がくっつく。名前側を切り詰めて、区切りの空白を必ず残す。
-	name := st.Name
-	if textwidth.Width(name) > nameCol-1 {
-		name = textwidth.Truncate(name, nameCol-1)
-	}
-	head := fmt.Sprintf("%s [%d/%d] ", icon, pos, s.total)
-	parts := []string{head + textwidth.Pad(name, nameCol)}
+	head, col := nameColumn(icon, pos, s.total, st.Name)
+	parts := []string{col}
 	if w := resultWord(st); w != "" {
 		parts = append(parts, w)
 	}
@@ -149,7 +160,7 @@ func (s *State) stepLines(st eventlog.StepEvent) []render.Line {
 	if st.Status != "skip" {
 		parts = append(parts, formatDuration(st.DurationMs))
 	}
-	label := strings.TrimRight(strings.Join(parts, "  "), " ")
+	label := strings.TrimRight(strings.Join(parts, colSep), " ")
 	// 端末幅を超える行は切り捨てず折り返す（一言・skip の理由・所要時間を落とさない）
 	lines := []render.Line{{Kind: render.KindText, Indent: 2, Text: label, IconLen: iconRuneLen, IconStyle: iconStyle, Wrap: true, HangIndent: textwidth.Width(head)}}
 
