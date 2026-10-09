@@ -50,6 +50,13 @@ type State struct {
 	total       int
 	log         string
 	pendingSkip []eventlog.StepEvent
+	counts      stepCounts
+	failed      []string // 失敗・timeout したステップ名（実行順）
+}
+
+// stepCounts は末尾の件数行に出す、状態ごとのステップ数。
+type stepCounts struct {
+	ok, fail, skip, cadence int
 }
 
 // NewState は State を初期化する。
@@ -112,6 +119,7 @@ func isFailStatus(status string) bool {
 }
 
 func (s *State) Step(st eventlog.StepEvent) render.Block {
+	s.count(st)
 	switch st.Status {
 	case "skip":
 		// 実行間隔による skip は途中に出さず、末尾の「今日は対象外」にまとめる。
@@ -126,6 +134,22 @@ func (s *State) Step(st eventlog.StepEvent) render.Block {
 		return render.Block{}
 	}
 	return render.Block{Lines: s.stepLines(st)}
+}
+
+// count は末尾の件数行と失敗の再掲のために、ステップの状態を数える。
+// disabled は「⊘ 無効」ブロックに件数が出るので数えない。
+func (s *State) count(st eventlog.StepEvent) {
+	switch {
+	case isFailStatus(st.Status):
+		s.counts.fail++
+		s.failed = append(s.failed, st.Name)
+	case st.Status == "skip" && isCadenceSkip(st):
+		s.counts.cadence++
+	case st.Status == "skip":
+		s.counts.skip++
+	case st.Status == "ok":
+		s.counts.ok++
+	}
 }
 
 func isCadenceSkip(st eventlog.StepEvent) bool {
@@ -338,6 +362,8 @@ func (s *State) Summary(sum eventlog.SummaryEvent) []render.Block {
 		}})
 	}
 
+	blocks = append(blocks, s.tallyBlock())
+
 	blocks = append(blocks, render.Block{Lines: []render.Line{
 		{Kind: render.KindRule},
 		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("所要 %s   全量ログ: %s", formatDuration(sum.WallMs), shortenPath(s.log)), Dim: true},
@@ -459,4 +485,16 @@ func shortenPath(p string) string {
 // 継続行をここまで下げると、本文がマーカーの下に潜らず読み始めが揃う。
 func markerWidth(step int) int {
 	return textwidth.Width(fmt.Sprintf("▸ [%d] ", step))
+}
+
+// tallyBlock は末尾に、失敗したステップ名（critical かどうかを問わない）と
+// 状態ごとの件数を出す。途中の結果行を読み飛ばしても、最後に失敗が見えるようにする。
+func (s *State) tallyBlock() render.Block {
+	c := s.counts
+	lines := []render.Line{{Kind: render.KindBlank}}
+	if len(s.failed) > 0 {
+		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 失敗 %d 件: %s", iconFail, len(s.failed), strings.Join(s.failed, ", ")), IconLen: iconRuneLen, IconStyle: styleForIcon(iconFail), Wrap: true, HangIndent: 2})
+	}
+	lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("成功 %d 件 / 失敗 %d 件 / skip %d 件 / 対象外 %d 件", c.ok, c.fail, c.skip, c.cadence), Dim: true, Wrap: true, HangIndent: 2})
+	return render.Block{Lines: lines}
 }
