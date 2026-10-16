@@ -130,3 +130,34 @@ func TestHangIndentAlignsContinuationLines(t *testing.T) {
 		}
 	}
 }
+
+// コマンド行は人がコピーして貼り付ける。途中で改行と空白を挟むと、
+// 貼り付けたコマンドが壊れて実行できない。先頭に空白を含む add_action の
+// 本文でも、コマンド行だけは幅を超えても 1 行のまま出す。
+func TestCommandLinesAreNotWrapped(t *testing.T) {
+	cmd := "→ $ python3 " + strings.Repeat("/segment", 10) + "/report.py summary"
+	text := "棚卸しする\n      対象: " + strings.Repeat("あ", 30) + "\n      " + cmd
+	lines := WrapText(text, 8)
+
+	var out bytes.Buffer
+	Render(&out, []Block{{Lines: lines}}, Options{Width: narrowWidth, Color: true})
+	got := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+
+	var cmdLines, descLines int
+	for _, l := range got {
+		if strings.Contains(l, "$ python3") {
+			cmdLines++
+			if !strings.Contains(l, "/report.py summary") {
+				t.Errorf("コマンド行が途中で切れている: %q", l)
+			}
+			continue
+		}
+		descLines++
+	}
+	if cmdLines != 1 {
+		t.Fatalf("コマンド行は 1 行のはずが %d 行: %q", cmdLines, got)
+	}
+	if descLines < 2 {
+		t.Fatalf("説明文の行は折り返されるはずが %d 行: %q", descLines, got)
+	}
+}
