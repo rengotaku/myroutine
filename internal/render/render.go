@@ -70,6 +70,11 @@ type Line struct {
 	// 出すとマーカーの下に本文が潜り込んで境目が読めない。マーカーの
 	// 表示幅を入れると、継続行が本文開始位置にぶら下がる。
 	HangIndent int
+	// Verbatim が true の行は折り返しも切り詰めもせず、幅を超えても 1 行の
+	// まま出す（コピーして実行するコマンド行向け）。描画側で改行と空白を
+	// 挟むと貼り付けたコマンドが壊れる。端末の自動折り返しはコピー時に
+	// 1 行に戻るため、この行に限り --width の上限から外す。
+	Verbatim bool
 }
 
 // Block は見出し（省略可）と Line の並び。
@@ -151,7 +156,7 @@ func renderTextLines(line Line, width int, color bool) []string {
 	}
 
 	left := prefix + colorizeText(line, color)
-	if textwidth.Width(left) <= width {
+	if line.Verbatim || textwidth.Width(left) <= width {
 		return []string{left}
 	}
 	if !line.Wrap {
@@ -253,9 +258,20 @@ func WrapText(text string, continIndent int) []Line {
 		} else if strings.HasPrefix(t, "$ ") {
 			// 既に "$ " 形式ならそのまま。
 		}
+		if isCommandLine(t) {
+			lines = append(lines, Line{Kind: KindText, Indent: continIndent, Text: t, Verbatim: true})
+			continue
+		}
 		lines = append(lines, Line{Kind: KindText, Indent: continIndent, Text: t, Wrap: true})
 	}
 	return lines
+}
+
+// isCommandLine は、人がコピーして実行する前提のコマンド行かを返す。
+// ステップの add_action 本文は継続行の先頭に空白を含むため、空白を除いて判定する。
+func isCommandLine(t string) bool {
+	s := strings.TrimLeft(t, " ")
+	return strings.HasPrefix(s, "→ $ ") || strings.HasPrefix(s, "$ ")
 }
 
 // FirstLine は改行を含みうる text の1行目だけを返す。
