@@ -75,6 +75,10 @@ type Line struct {
 	// 挟むと貼り付けたコマンドが壊れる。端末の自動折り返しはコピー時に
 	// 1 行に戻るため、この行に限り --width の上限から外す。
 	Verbatim bool
+	// Command が true なら、Text の「$ 」から行末までを着色する（要対応の
+	// 次に打つコマンドを、説明の行と見分けるため）。行頭の空白と「→」は
+	// 色の外に残す。Text に「$ 」が無ければ着色しない。
+	Command bool
 }
 
 // Block は見出し（省略可）と Line の並び。
@@ -96,6 +100,7 @@ const (
 	ansiRed        = "\x1b[31m"
 	ansiBrightGray = "\x1b[90m"
 	ansiDim        = "\x1b[2m"
+	ansiCommand    = "\x1b[1;36m"
 )
 
 func ansiForStyle(st Style) string {
@@ -196,14 +201,21 @@ func renderTextLines(line Line, width int, color bool) []string {
 
 // colorizeText は line.Text に ANSI コードを埋め込む。着色対象は
 // (1) IconLen > 0 なら先頭 IconLen rune だけを IconStyle の色にする、
-// (2) Dim なら全体を dim にする（(1) と排他、Dim を優先）。
-// どちらでもなければそのまま返す（本文を色で埋めない）。
+// (2) Dim なら全体を dim にする（(1) と排他、Dim を優先）、
+// (3) Command なら「$ 」から行末までを着色する。
+// どれでもなければそのまま返す（本文を色で埋めない）。
 func colorizeText(line Line, color bool) string {
 	if !color {
 		return line.Text
 	}
 	if line.Dim {
 		return ansiDim + line.Text + ansiReset
+	}
+	if line.Command {
+		if i := strings.Index(line.Text, "$ "); i >= 0 {
+			return line.Text[:i] + ansiCommand + line.Text[i:] + ansiReset
+		}
+		return line.Text
 	}
 	if line.IconLen > 0 && line.IconStyle != StyleNone {
 		code := ansiForStyle(line.IconStyle)

@@ -436,9 +436,20 @@ func actionBlock(actions []eventlog.ActionItem) render.Block {
 		}
 		lines = append(lines, render.Line{Kind: render.KindBlank})
 		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("▸ [%d] %s", a.Step, first), Wrap: true, HangIndent: markerWidth(a.Step)})
-		lines = append(lines, render.WrapText(a.Text, 8)...)
+		lines = append(lines, markCommands(render.WrapText(a.Text, 8))...)
 	}
 	return render.Block{Lines: lines}
+}
+
+// markCommands はコマンド行（WrapText が Verbatim にした行）に Command を立てた
+// コピーを返す。要対応では次に打つコマンドを説明の行と見分けたいので着色する。
+func markCommands(lines []render.Line) []render.Line {
+	out := make([]render.Line, len(lines))
+	for i, l := range lines {
+		l.Command = l.Verbatim
+		out[i] = l
+	}
+	return out
 }
 
 func listBlock(icon, label string, n int, items []item) render.Block {

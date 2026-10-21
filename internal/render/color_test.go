@@ -89,3 +89,31 @@ func TestDimStyleTakesPrecedenceOverIcon(t *testing.T) {
 		t.Fatalf("Dim: true のときは dim で描画されるべき。got: %q", got)
 	}
 }
+
+// TestCommandLineColorsFromDollar は Command: true の行で、「$ 」から行末だけが
+// 着色され、行頭の空白と「→」は色の外に残ることを確認する。
+func TestCommandLineColorsFromDollar(t *testing.T) {
+	lines := []Line{
+		{Kind: KindText, Indent: 8, Text: "      → $ /routine.dotfiles-diff-fix", Verbatim: true, Command: true},
+	}
+	var out bytes.Buffer
+	Render(&out, []Block{{Lines: lines}}, Options{Width: 40, Color: true})
+	got := out.String()
+
+	want := "      → " + ansiCommand + "$ /routine.dotfiles-diff-fix" + ansiReset
+	if !strings.Contains(got, want) {
+		t.Fatalf("「$ 」から行末だけが着色されるべき。got: %q", got)
+	}
+}
+
+// TestCommandLineNoColor は Color: false のとき Command 行にも ANSI を出さない。
+func TestCommandLineNoColor(t *testing.T) {
+	lines := []Line{
+		{Kind: KindText, Indent: 8, Text: "$ make ci", Verbatim: true, Command: true},
+	}
+	var out bytes.Buffer
+	Render(&out, []Block{{Lines: lines}}, Options{Width: 40, Color: false})
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("Color: false で ANSI が出た。got: %q", out.String())
+	}
+}

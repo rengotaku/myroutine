@@ -406,3 +406,29 @@ func TestSummaryCountsWrapOnNarrowTerminal(t *testing.T) {
 		}
 	}
 }
+
+// 要対応のコマンド行だけを着色する。説明の行と、きょう回すもの・情報のコマンド行には付けない。
+func TestActionCommandLineIsColored(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 1})
+	st.Step(eventlog.StepEvent{N: 1, Name: "A", Status: "ok"})
+
+	var got strings.Builder
+	for _, b := range st.Summary(eventlog.SummaryEvent{
+		Actions: []eventlog.ActionItem{{Step: 4, ID: "a", Text: "停止\n      1 件の差分があります。\n      → $ /routine.dotfiles-diff-fix"}},
+		Todos:   []eventlog.TodoItem{{Step: 9, ID: "t", Text: "回す\n      → $ /routine.progress-report"}},
+	}) {
+		got.WriteString(renderBlock(b, 100, true))
+	}
+	out := got.String()
+
+	if !strings.Contains(out, "\x1b[1;36m$ /routine.dotfiles-diff-fix\x1b[0m") {
+		t.Errorf("要対応のコマンド行が着色されていない:\n%q", out)
+	}
+	if strings.Contains(out, "\x1b[1;36m$ /routine.progress-report") {
+		t.Errorf("きょう回すもののコマンド行まで着色された:\n%q", out)
+	}
+	if strings.Contains(out, "\x1b[1;36m      1 件") || strings.Contains(out, "\x1b[1;36m1 件") {
+		t.Errorf("説明の行まで着色された:\n%q", out)
+	}
+}
