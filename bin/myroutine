@@ -233,7 +233,35 @@ _mr_unescape() {
   t=${t//\%25/%}
   print -r -- "$t"
 }
-add_action() { _mr_emit A "$1" "$2" }
+# 要対応は「何が起きているか」と「人が貼って打つコマンド」を分けて受け取る。
+#   add_action <id> <本文> --cmd <コマンド> [--cmd <コマンド>...]
+# コマンドは本文の後ろに「→ $ <コマンド>」の行として付き、要対応の表示で色付け・
+# 折り返し除外の対象になる。--cmd の無い要対応は Go 版の runner が要対応に積む（#58）。
+add_action() {
+  if (( $# < 2 )); then
+    print -ru2 -- "A: id と本文の両方が必要です"
+    return 1
+  fi
+  local id=$1 text=$2
+  shift 2
+  while (( $# )); do
+    case $1 in
+      --cmd)
+        if (( $# < 2 )) || [[ -z $2 ]]; then
+          print -ru2 -- "A: --cmd の後ろにコマンドがありません: ${id}"
+          return 1
+        fi
+        text+=$'\n'"      → \$ $2"
+        shift 2
+        ;;
+      *)
+        print -ru2 -- "A: 知らない引数です: $1（${id}）"
+        return 1
+        ;;
+    esac
+  done
+  _mr_emit A "$id" "$text"
+}
 add_todo()   { _mr_emit T "$1" "$2" }
 add_info()   { _mr_emit I "$1" "$2" }
 # --jsonl の step イベントに載る 1 行要約。id は固定でよい（連続日数の追跡対象ではない）。

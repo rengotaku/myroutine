@@ -36,6 +36,9 @@ type Config struct {
 	// SummaryCheck は成功ステップの一言の検査（ADR 0007）。MYROUTINE_SUMMARY_CHECK=0 で切る
 	// （一言を出さない仮のステップを大量に使う統合テスト向け）。
 	SummaryCheck bool
+	// ActionCheck は要対応にコマンド行があるかの検査（#58）。MYROUTINE_ACTION_CHECK=0 で切る
+	// （SummaryCheck と同じく、仮のステップを大量に使う統合テスト向け）。
+	ActionCheck bool
 }
 
 // usageError は使い方の誤り。メッセージを出して終了コード 1 で終わる。
@@ -122,6 +125,7 @@ func loadConfig(o Options) (Config, error) {
 		NoColor:  os.Getenv("NO_COLOR") != "",
 
 		SummaryCheck: os.Getenv("MYROUTINE_SUMMARY_CHECK") != "0",
+		ActionCheck:  os.Getenv("MYROUTINE_ACTION_CHECK") != "0",
 	}
 
 	t, err := strconv.Atoi(envOr("MYROUTINE_TIMEOUT", "600"))

@@ -14,7 +14,7 @@ step_run() {
   info "ルートボリューム使用率: ${used}%"
   if (( used >= threshold )); then
     warn "しきい値 ${threshold}% を超えています"
-    add_action low "ディスク使用率 ${used}% — 不要ファイルを整理する"
+    add_action low "ディスク使用率 ${used}% — 不要ファイルを整理する" --cmd "du -sh ~/* | sort -h | tail"
   else
     ok "しきい値 ${threshold}% 未満"
   fi

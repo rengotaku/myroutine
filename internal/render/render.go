@@ -286,6 +286,18 @@ func isCommandLine(t string) bool {
 	return strings.HasPrefix(s, "→ $ ") || strings.HasPrefix(s, "$ ")
 }
 
+// HasCommandLine は、要対応の本文 text の 2 行目以降にコマンド行があるかを返す。
+// 1 行目は見出しとして扱われ、コマンド行としては描画されない（WrapText と同じ）。
+func HasCommandLine(text string) bool {
+	parts := strings.Split(text, "\n")
+	for _, p := range parts[1:] {
+		if isCommandLine(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // FirstLine は改行を含みうる text の1行目だけを返す。
 func FirstLine(text string) string {
 	if i := strings.IndexByte(text, '\n'); i >= 0 {
