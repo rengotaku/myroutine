@@ -24,7 +24,7 @@ step_run() {
   if (( ${#failed} )); then
     err "fetch に失敗: ${(j:, :)failed}"
     add_action fetch-failed "fetch に失敗したリポジトリがある（${(j:, :)failed}）— 認証と remote を確認する" \
-      --cmd "git -C ${root}/${failed[1]} fetch origin"
+      --cmd "git -C ${(q)root}/${(q)failed[1]} fetch origin"
     return 1
   fi
   ok "同期完了"

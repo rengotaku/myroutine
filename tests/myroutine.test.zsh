@@ -298,6 +298,15 @@ out=$(mr)
 assert_contains "$out" "--cmd の後ろにコマンドがありません" "--cmd: 値が無ければ拒否する"
 
 newenv
+mkstep 10-blank.sh 'step_name="空白だけ"
+step_run() { add_action fix "壊れている" --cmd "   " }'
+mkstep 20-double.sh 'step_name="値の位置に --cmd"
+step_run() { add_action fix "壊れている" --cmd --cmd }'
+out=$(mr)
+assert_contains "$out" "コマンドがありません: fix" "--cmd: 空白だけの値を拒否する"
+assert_contains "$out" "✓ 要対応なし" "--cmd: 拒否した要対応は積まない"
+
+newenv
 mkstep 10-unknown.sh 'step_name="知らない引数"
 step_run() { add_action fix "壊れている" "make fix" }'
 out=$(mr)

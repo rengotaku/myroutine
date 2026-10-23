@@ -12,6 +12,6 @@ step_run() {
     return 0
   fi
   err "疎通なし ($target)"
-  add_action down "ネットワークが不通" --cmd "curl -fsS --max-time 5 -o /dev/null ${target}"
+  add_action down "ネットワークが不通" --cmd "curl -fsS --max-time 5 -o /dev/null ${(q)target}"
   return 1
 }

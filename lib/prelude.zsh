@@ -113,7 +113,8 @@ add_action() {
   while (( $# )); do
     case $1 in
       --cmd)
-        if (( $# < 2 )) || [[ -z $2 ]]; then
+        # 空白だけの値や、値の位置に来た --cmd はコマンドとして扱わない
+        if (( $# < 2 )) || [[ -z ${2//[[:space:]]/} || $2 == --cmd ]]; then
           print -ru2 -- "A: --cmd の後ろにコマンドがありません: ${id}"
           return 1
         fi
