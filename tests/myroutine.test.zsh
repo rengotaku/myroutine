@@ -73,6 +73,8 @@ newenv() {
   export MYROUTINE_STEPS_DIR="$td/steps.d" MYROUTINE_LOG_DIR="$td/log"
   # 仮のステップは一言（emit_summary）を出さないので、一言の検査は専用のテストでだけ有効にする
   export MYROUTINE_SUMMARY_CHECK=0
+  # 同じ理由で、要対応のコマンド行の検査（#58）も専用のテストでだけ有効にする
+  export MYROUTINE_ACTION_CHECK=0
   export MR_TD=$td
 }
 
@@ -281,6 +283,34 @@ mkstep 10-badid.sh 'step_name="不正 id"
 step_run() { add_action "bad id!" "本文" }'
 out=$(mr)
 assert_contains "$out" "id に使えるのは" "id の文字種を検証する"
+
+newenv
+mkstep 10-cmd.sh 'step_name="コマンド付き"
+step_run() { add_action fix "壊れている" --cmd "make fix" --cmd "make check" }'
+out=$(mr)
+assert_contains "$out" "$ make fix" "--cmd: コマンドが「$ 」の行として出る"
+assert_contains "$out" "$ make check" "--cmd: 複数指定すると順に並ぶ"
+
+newenv
+mkstep 10-nocmdarg.sh 'step_name="コマンドなし"
+step_run() { add_action fix "壊れている" --cmd }'
+out=$(mr)
+assert_contains "$out" "--cmd の後ろにコマンドがありません" "--cmd: 値が無ければ拒否する"
+
+newenv
+mkstep 10-blank.sh 'step_name="空白だけ"
+step_run() { add_action fix "壊れている" --cmd "   " }'
+mkstep 20-double.sh 'step_name="値の位置に --cmd"
+step_run() { add_action fix "壊れている" --cmd --cmd }'
+out=$(mr)
+assert_contains "$out" "コマンドがありません: fix" "--cmd: 空白だけの値を拒否する"
+assert_contains "$out" "✓ 要対応なし" "--cmd: 拒否した要対応は積まない"
+
+newenv
+mkstep 10-unknown.sh 'step_name="知らない引数"
+step_run() { add_action fix "壊れている" "make fix" }'
+out=$(mr)
+assert_contains "$out" "知らない引数です: make fix" "add_action: 3 つ目以降の位置引数は拒否する"
 
 # ─────────────────────────────────────────────────────────────────
 group "ステップ間のスコープ分離"
@@ -2370,6 +2400,25 @@ assert_contains "$out" "一言なし の一言（emit_summary）を出してい�
 assert_contains "$out" "英単語「clean」" "一言: 英単語を指摘する"
 assert_not_contains "$out" "良い一言 の一言" "一言: ルールどおりの一言は指摘しない"
 assert_eq "$(MYROUTINE_SUMMARY_CHECK=1 mr_rc)" "0" "一言: 違反しても終了コードは変えない"
+fi
+
+# ─────────────────────────────────────────────────────────────────
+if (( MR_GO )); then
+group "要対応のコマンド行の検査（#58。Go 版のみ）"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-with.sh 'step_name="コマンドあり"
+step_run() { add_action fix "壊れている" --cmd "make fix" }'
+mkstep 20-without.sh 'step_name="コマンドなし"
+step_run() { add_action vague "壊れている — 確認する" }'
+out=$(MYROUTINE_ACTION_CHECK=1 mr)
+assert_contains "$out" "要対応 without.vague にコマンド行が無い — without.sh の add_action に --cmd を付ける" "コマンド行: 無い要対応を指摘する"
+assert_not_contains "$out" "要対応 with.fix にコマンド行が無い" "コマンド行: --cmd 付きは指摘しない"
+assert_contains "$out" "✗ 要対応 3 件" "コマンド行: 指摘は元の要対応とは別に積まれる"
+assert_eq "$(MYROUTINE_ACTION_CHECK=1 mr_rc)" "0" "コマンド行: 違反しても終了コードは変えない"
+out=$(MYROUTINE_ACTION_CHECK=1 mr -n)
+assert_not_contains "$out" "コマンド行が無い" "コマンド行: dry-run では見ない"
 fi
 
 # ─────────────────────────────────────────────────────────────────

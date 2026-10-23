@@ -248,6 +248,7 @@ func (r *Runner) confirm(msg string) bool {
 func (r *Runner) finalize(s *Step, res execResult) bool {
 	cr := drainChan(r.chanPath(s.N))
 	r.actions = append(r.actions, cr.actions...)
+	r.checkActionCommands(s, cr.actions)
 	r.todos = append(r.todos, cr.todos...)
 	r.infos = append(r.infos, cr.infos...)
 	if cr.summary != "" {

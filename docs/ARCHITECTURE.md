@@ -226,6 +226,8 @@ internal/format, internal/render ← 人が読む出力（myroutine-render と�
 Go の runner はステップを `zsh <prelude> meta|requires|exec <step.sh>` の形で起動する。prelude は
 実行のたびに一時ディレクトリへ書き出す。プリミティブ（`ok` / `capture` / `confirm` /
 `run` / `add_action` …）は prelude の中にあり、zsh 版と同じ名前・挙動を持つ。
+`add_action` の `--cmd` はコマンド行（`→ $ <コマンド>`）として本文に付け足すだけで、
+チャネルの書式は変えない。コマンド行の有無は runner が `render.HasCommandLine` で検査する（ADR 0008）。
 
 | 向き | 経路 | 中身 |
 |---|---|---|

@@ -140,7 +140,7 @@ step_run() {
   local -a pkgs=(${(f)outdated})
   run brew upgrade ${pkgs}
   emit_summary "${#pkgs} 件更新"
-  add_action outdated "${#pkgs} 件のパッケージを確認する"
+  add_action outdated "${#pkgs} 件のパッケージを確認する" --cmd "brew outdated"
 }
 
 # brew は pin された依存があると、更新に成功していても非 0 を返すことがある。
@@ -178,12 +178,27 @@ step_verify() { [[ -z $(brew outdated --quiet) ]] }
 |---|---|
 | `emit_summary "<一言>"` | 成功したときの結果行の一言（下の「結果行の書式」のルールに従う） |
 | `ok` / `warn` / `err` / `info` | 出力ヘルパー（本文。ログに残り、失敗時は末尾が画面に出る） |
-| `add_action <id> "<やること>"` | 要対応サマリに載る（劣化検知の対象） |
+| `add_action <id> "<やること>" --cmd "<コマンド>"` | 要対応サマリに載る（劣化検知の対象）。`--cmd` は必須で、複数回指定できる（下の「要対応のコマンド」） |
 | `add_todo <id> "<きょう回すもの>"` | ルーティンセクションに載る（劣化検知の対象外） |
 | `add_info <id> "<事後報告>"` | 情報セクションに載る |
 | `capture [-d 既定値] VAR cmd...` | コマンド失敗を検知できる形で出力を受け取る |
 | `confirm "<問い>"` | 確認プロンプト（tty 不在なら中止側へ倒れる） |
 | `run cmd...` | 副作用の実行（dry-run では実行しない） |
+
+### 要対応のコマンド
+
+要対応は「人が次に打つもの」を出す場所なので、打つコマンドを `--cmd` で必ず渡します。
+本文の後ろに `→ $ <コマンド>` の行として付き、要対応の表示で色が付き、端末幅で折り返されません。
+
+```zsh
+add_action sso-login "AWS SSO のセッションが切れている" --cmd "aws sso login --profile ${profile}"
+add_action review "advisory の棚卸しが溜まっている" --cmd "/routine.guard-promote"
+```
+
+- 画面操作しか無いときも、開くためのコマンドを書く（`open -a "Google Chrome" chrome://settings/help` など）
+- `--cmd` の無い要対応は、Go 版の runner が `<id>.__cmd` の要対応として積みます（終了コードは変えない。
+  `MYROUTINE_ACTION_CHECK=0` で切れる）。実行されない分岐は実行時には見つからないので、
+  steps.d を管理するリポジトリ側の CI で「全ての `add_action` に `--cmd` があるか」を静的に検査してください
 
 ### 結果行の書式
 

@@ -11,3 +11,4 @@
 | [0005](0005-todo-as-third-summary-channel.md) | 定常のやることを第 3 のチャネル (add_todo) に分ける | accepted | 2026-08-28 | 毎日そこにある定常のやることを要対応にも情報にも載せず、履歴を持たない第 3 枠として分けた理由 |
 | [0006](0006-runner-in-go-with-zsh-step-prelude.md) | runner を Go で書き直し、ステップは zsh の prelude 越しに実行する | accepted | 2026-10-05 | ADR 0001 で捨てた Go 案を採り直す判断。境界を「環境変数で渡し、fd 3 の行で返す」既存の契約に固定し、プリミティブは zsh の prelude に閉じ込める |
 | [0007](0007-uniform-result-line.md) | 結果行の書式を状態によらず 1 つにし、成功の一言を実行のたびに検査する | accepted | 2026-10-08 | 成功・失敗・skip の結果行を「記号 [位置/全件] 名前  一言  所要時間」に揃え、ステップが書く唯一の一言（emit_summary）を runner が実行後に検査する理由 |
+| [0008](0008-action-command-as-argument.md) | 要対応のコマンドを add_action の引数で受け取り、無ければ runner が要対応に積む | accepted | 2026-10-23 | 要対応の本文に埋もれていた「人が打つコマンド」を --cmd で別に受け取り、コマンド行の無い要対応を実行のたびに検査する理由と、ステップを Python 等に書き直す案を捨てた理由 |
