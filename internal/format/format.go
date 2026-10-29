@@ -422,7 +422,7 @@ func actionBlock(actions []eventlog.ActionItem) render.Block {
 	lines := []render.Line{
 		{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("%s 要対応 %d 件", iconFail, len(actions)), IconLen: iconRuneLen, IconStyle: styleForIcon(iconFail)},
 	}
-	for _, a := range actions {
+	for i, a := range actions {
 		first := render.FirstLine(a.Text)
 		var tags []string
 		if a.New {
@@ -434,8 +434,15 @@ func actionBlock(actions []eventlog.ActionItem) render.Block {
 		if len(tags) > 0 {
 			first = first + "  " + strings.Join(tags, " ")
 		}
-		lines = append(lines, render.Line{Kind: render.KindBlank})
-		lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("▸ [%d] %s", a.Step, first), Wrap: true, HangIndent: markerWidth(a.Step)})
+		if i > 0 && actions[i-1].Step == a.Step {
+			// 同じステップの 2 件目以降は番号を繰り返さない（別のステップに見えるため）。
+			// 空行を挟まず、本文の開始位置を 1 件目にそろえる
+			indent := 2 + markerWidth(a.Step) - textwidth.Width(subMarker)
+			lines = append(lines, render.Line{Kind: render.KindText, Indent: indent, Text: subMarker + first, Wrap: true, HangIndent: textwidth.Width(subMarker)})
+		} else {
+			lines = append(lines, render.Line{Kind: render.KindBlank})
+			lines = append(lines, render.Line{Kind: render.KindText, Indent: 2, Text: fmt.Sprintf("▸ [%d] %s", a.Step, first), Wrap: true, HangIndent: markerWidth(a.Step)})
+		}
 		lines = append(lines, markCommands(render.WrapText(a.Text, 8))...)
 	}
 	return render.Block{Lines: lines}
@@ -491,6 +498,9 @@ func shortenPath(p string) string {
 	}
 	return p
 }
+
+// subMarker は同じステップの 2 件目以降の要対応に付ける行頭マーカー（番号なし）。
+const subMarker = "▸ "
 
 // markerWidth は "▸ [3] " のような行頭マーカーの表示幅を返す。折り返しの
 // 継続行をここまで下げると、本文がマーカーの下に潜らず読み始めが揃う。

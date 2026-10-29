@@ -407,6 +407,39 @@ func TestSummaryCountsWrapOnNarrowTerminal(t *testing.T) {
 	}
 }
 
+// 同じステップから続けて出た要対応は、番号を 1 件目にだけ付ける。番号を繰り返すと
+// 別々のステップから出たように見える（#60）。2 件目は本文の開始位置を 1 件目にそろえ、
+// 間に空行を入れない。件数は要対応の数のまま。
+func TestActionsFromSameStepShareNumber(t *testing.T) {
+	st := NewState(false)
+	st.Run(eventlog.RunEvent{Total: 1})
+
+	var got strings.Builder
+	for _, b := range st.Summary(eventlog.SummaryEvent{
+		Actions: []eventlog.ActionItem{
+			{Step: 8, ID: "chrome.relaunch", Text: "再起動待ち\n      動作中: 1 / インストール済み: 2\n      → $ open -a Chrome", New: true},
+			{Step: 8, ID: "chrome.stalled", Text: "自動更新が止まっている\n      → $ open chrome://settings/help", New: true},
+			{Step: 16, ID: "word.review", Text: "棚卸しする\n      → $ /routine.ai-word-review"},
+		},
+	}) {
+		got.WriteString(renderBlock(b, 100, false))
+	}
+	want := `  ✗ 要対応 3 件
+
+  ▸ [8] 再起動待ち  NEW
+              動作中: 1 / インストール済み: 2
+              → $ open -a Chrome
+      ▸ 自動更新が止まっている  NEW
+              → $ open chrome://settings/help
+
+  ▸ [16] 棚卸しする
+              → $ /routine.ai-word-review
+`
+	if out := got.String(); !strings.Contains(out, want) {
+		t.Errorf("同じステップの要対応がまとまっていない:\n--- got\n%s--- want (部分一致)\n%s", out, want)
+	}
+}
+
 // 要対応のコマンド行だけを着色する。説明の行と、きょう回すもの・情報のコマンド行には付けない。
 func TestActionCommandLineIsColored(t *testing.T) {
 	st := NewState(false)
