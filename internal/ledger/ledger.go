@@ -70,6 +70,10 @@ func Append(path string, evs []Event) error {
 		}
 		buf = append(append(buf, b...), '\n')
 	}
+	// 前回が改行なしで途切れていたら、先に改行を足して新しい行を壊さない
+	if last, ok := lastByte(path); ok && last != 10 {
+		buf = append([]byte{10}, buf...)
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
@@ -156,4 +160,22 @@ func Open(entries []Entry) []Entry {
 		}
 	}
 	return out
+}
+
+// lastByte はファイル末尾の 1 バイト。ファイルが無い・空・読めないときは ok=false。
+func lastByte(path string) (b byte, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return 0, false
+	}
+	var one [1]byte
+	if _, err := f.ReadAt(one[:], st.Size()-1); err != nil {
+		return 0, false
+	}
+	return one[0], true
 }

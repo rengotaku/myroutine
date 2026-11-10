@@ -34,6 +34,7 @@ func (r *Runner) stepNameOf(n int, slug string) string {
 // cleared は今回「評価できた」ステップ（r.evaluated）の未対応だけが対象で、
 // 間隔で skip・失敗・未実行のステップの未対応は閉じない。
 func (r *Runner) appendLedger() {
+	r.ledgerWritten = true
 	at := r.ledgerStamp()
 	var evs []ledger.Event
 	pos := map[string]int{} // id → evs 内の位置
@@ -89,6 +90,12 @@ func (r *Runner) runDone(ids []string) int {
 		r.diag.line("ERROR: 未対応の要対応ではありません: " + strings.Join(bad, ", "))
 		r.diag.line("       何も記録していません")
 		return 1
+	}
+	if r.opt.DryRun {
+		for _, id := range ids {
+			r.diag.info("[dry-run] done を書く予定: " + id)
+		}
+		return 0
 	}
 	at := r.ledgerStamp()
 	var evs []ledger.Event

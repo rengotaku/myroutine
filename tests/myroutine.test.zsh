@@ -2482,6 +2482,41 @@ out=$(mr done f.stuck)
 assert_contains "$out" "壊れた行を 1 行読み飛ばしました" "履歴: 壊れた行は飛ばしたことを出す"
 assert_eq "$(mr_rc done f.stuck)" "1" "done: 閉じた後の再実行は 1"
 
+# dry-run の done は検証だけして書かない。未対応でない id があれば 1。
+newenv
+mkstep 10-d.sh 'step_name="D"
+step_run() { add_action one "要対応" --cmd "make x" }'
+led="$MYROUTINE_LOG_DIR/actions.jsonl"
+mr >/dev/null
+before=$(cat "$led")
+out=$(mr -n done d.one)
+assert_contains "$out" "d.one" "done: dry-run は書く予定の id を出す"
+assert_eq "$(mr_rc -n done d.one)" "0" "done: dry-run は未対応の id なら終了コード 0"
+assert_eq "$(mr_rc done d.one --dry-run)" "0" "done: --dry-run を後ろに置いても同じ"
+assert_eq "$(cat "$led")" "$before" "done: dry-run は履歴を変えない"
+assert_eq "$(mr_rc -n done nothing.here)" "1" "done: dry-run でも未対応でない id は終了コード 1"
+
+# 改行なしで途切れた末尾があっても、done の行を巻き込まない
+printf '%s' '{"ev":"seen","at":"2026-1' >> "$led"
+assert_eq "$(mr_rc done d.one)" "0" "done: 改行なしの壊れた末尾があっても書ける"
+out=$(mr done d.one)
+assert_contains "$out" "壊れた行を 1 行読み飛ばしました" "done: 壊れた末尾は 1 行だけ飛ばされる"
+assert_eq "$(mr_rc done d.one)" "1" "done: 壊れた末尾の後ろの done が効いている"
+
+# 中断されても、それまでに集まった要対応は seen として残る
+newenv
+mkstep 10-first.sh 'step_name="先行"
+step_run() { add_action kept "先行の要対応" --cmd "make x" }'
+mkstep 20-slow.sh 'step_name="後続"
+step_run() { touch "$MR_TD/started"; sleep 30 }'
+led="$MYROUTINE_LOG_DIR/actions.jsonl"
+"$MR" --no-lock </dev/null >/dev/null 2>&1 &
+p=$! w=0
+until [[ -e "$MR_TD/started" ]] || (( w >= 50 )); do sleep 0.1; (( w++ )); done
+kill -TERM $p 2>/dev/null
+wait $p 2>/dev/null
+assert_eq "$(grep -c '"ev":"seen","at":"[^"]*","id":"first.kept"' "$led" 2>/dev/null)" "1" "履歴: 中断しても集まった要対応の seen が 1 回だけ残る"
+
 # 予約名
 newenv
 mkstep 10-done.sh 'step_name="D"

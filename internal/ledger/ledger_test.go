@@ -98,3 +98,18 @@ func TestAppendAppends(t *testing.T) {
 		t.Fatalf("es=%+v err=%v", es, err)
 	}
 }
+
+func TestAppendAfterUnterminatedTail(t *testing.T) {
+	p := filepath.Join(t.TempDir(), FileName)
+	body := `{"ev":"seen","at":"2026-11-01T09:00:00Z","id":"a.x","slug":"a","step_name":"A","text":"t"}` + "\n" + `{"ev":"seen","at":"2026-1`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(p, []Event{{Ev: EvDone, At: "2026-11-02T09:00:00Z", ID: "a.x"}}); err != nil {
+		t.Fatal(err)
+	}
+	es, skipped, err := Load(p)
+	if err != nil || skipped != 1 || len(es) != 1 || es[0].Status != StatusDone {
+		t.Fatalf("es=%+v skipped=%d err=%v", es, skipped, err)
+	}
+}
