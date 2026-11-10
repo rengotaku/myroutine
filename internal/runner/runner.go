@@ -71,11 +71,12 @@ type Runner struct {
 	newIDs    map[string]bool
 	resolved  []string
 
-	fullRun bool
-	lastRC  int
-	posOf   map[int]int
-	total   int
-	runT0   time.Time
+	fullRun       bool
+	ledgerWritten bool // actions.jsonl へ書いた（中断経路との二重書きを防ぐ）
+	lastRC        int
+	posOf         map[int]int
+	total         int
+	runT0         time.Time
 }
 
 // Main は CLI の入口。終了コードを返す。
@@ -138,6 +139,9 @@ func (r *Runner) main() int {
 	if sub == "last" {
 		return r.showLast()
 	}
+	if sub == "done" {
+		return r.runDone(r.opt.Args[1:])
+	}
 
 	if err := r.setupExec(); err != nil {
 		r.diag.line(err.Error())
@@ -177,6 +181,10 @@ func (r *Runner) main() int {
 		return 1
 	}
 	code := r.runSequence(seq)
+	// 中断で finish を通らなかった実行も、集まった分の要対応の履歴は残す。
+	if r.interrupted() && !r.opt.DryRun && !r.ledgerWritten {
+		r.appendLedger()
+	}
 	return r.exitOr(code)
 }
 

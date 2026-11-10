@@ -2422,6 +2422,110 @@ assert_not_contains "$out" "コマンド行が無い" "コマンド行: dry-run 
 fi
 
 # ─────────────────────────────────────────────────────────────────
+if (( MR_GO )); then
+group "要対応の履歴 actions.jsonl と done（Go 版のみ）"
+# ─────────────────────────────────────────────────────────────────
+
+newenv
+mkstep 10-a.sh 'step_name="毎回"
+step_run() { [[ -e "$MR_TD/flag" ]] && add_action fix "壊れている" --cmd "make fix"; return 0 }'
+mkstep 20-w.sh 'step_name="週次"
+step_cadence=weekly
+step_run() { add_action wk "週次の要対応" --cmd "make wk" }'
+led="$MYROUTINE_LOG_DIR/actions.jsonl"
+: > "$MR_TD/flag"
+mr >/dev/null
+assert_eq "$(grep -c '"ev":"seen"' "$led")" "2" "履歴: 要対応が出た実行で seen が増える"
+assert_contains "$(cat "$led")" '"id":"a.fix","slug":"a","step_name":"毎回"' "履歴: seen に id / slug / step_name が入る"
+
+# 次の実行で a は走って要対応を出さない → cleared。w は間隔で skip → 閉じない。
+rm "$MR_TD/flag"
+mr >/dev/null
+assert_eq "$(grep -c '"ev":"cleared","at":"[^"]*","id":"a.fix"' "$led")" "1" "履歴: 評価できたステップの消えた要対応に cleared が付く"
+assert_not_contains "$(grep '"ev":"cleared"' "$led")" "w.wk" "履歴: 間隔で skip したステップの要対応は閉じない"
+
+# done: 未対応でない id が 1 つでもあれば何も書かない
+before=$(wc -l < "$led")
+assert_eq "$(mr_rc done w.wk a.fix)" "1" "done: 閉じ済みの id が混ざると終了コード 1"
+assert_eq "$(mr_rc done nothing.here)" "1" "done: 存在しない id は終了コード 1"
+assert_eq "$(mr_rc done)" "1" "done: id 無しは使い方エラー"
+out=$(mr done w.wk a.fix)
+assert_contains "$out" "a.fix" "done: 駄目な id を出す"
+assert_eq "$(wc -l < "$led")" "$before" "done: エラーのときは何も書かない"
+assert_eq "$(mr_rc done w.wk)" "0" "done: 未対応の id は終了コード 0"
+assert_contains "$(tail -1 "$led")" '"ev":"done"' "done: done が追記される"
+assert_eq "$(mr_rc done w.wk)" "1" "done: 閉じた id をもう一度は閉じられない"
+
+# 閉じた後に同じ要対応が出たら新しい 1 件として開く。slug 指定の部分実行でも書く。
+mr w >/dev/null
+assert_eq "$(grep -c '"ev":"seen","at":"[^"]*","id":"w.wk"' "$led")" "2" "履歴: 部分実行でも seen を書く"
+assert_eq "$(mr_rc done w.wk)" "0" "done: 再び出た要対応は未対応として閉じられる"
+
+# dry-run は何も書かない
+before=$(wc -l < "$led")
+mr -n >/dev/null
+assert_eq "$(wc -l < "$led")" "$before" "履歴: dry-run は何も書かない"
+
+# 失敗したステップの未対応は閉じない（評価できていない）
+newenv
+mkstep 10-f.sh 'step_name="失敗"
+step_run() { [[ -e "$MR_TD/boom" ]] && return 1; add_action stuck "残っている" --cmd "make x"; return 0 }'
+led="$MYROUTINE_LOG_DIR/actions.jsonl"
+mr >/dev/null
+: > "$MR_TD/boom"
+mr >/dev/null
+assert_not_contains "$(cat "$led")" '"ev":"cleared"' "履歴: 失敗したステップの未対応は cleared にしない"
+
+# 履歴ファイルが壊れていても止まらず、読み飛ばしを 1 行出す
+print -r -- "not json" >> "$led"
+out=$(mr done f.stuck)
+assert_contains "$out" "壊れた行を 1 行読み飛ばしました" "履歴: 壊れた行は飛ばしたことを出す"
+assert_eq "$(mr_rc done f.stuck)" "1" "done: 閉じた後の再実行は 1"
+
+# dry-run の done は検証だけして書かない。未対応でない id があれば 1。
+newenv
+mkstep 10-d.sh 'step_name="D"
+step_run() { add_action one "要対応" --cmd "make x" }'
+led="$MYROUTINE_LOG_DIR/actions.jsonl"
+mr >/dev/null
+before=$(cat "$led")
+out=$(mr -n done d.one)
+assert_contains "$out" "d.one" "done: dry-run は書く予定の id を出す"
+assert_eq "$(mr_rc -n done d.one)" "0" "done: dry-run は未対応の id なら終了コード 0"
+assert_eq "$(mr_rc done d.one --dry-run)" "0" "done: --dry-run を後ろに置いても同じ"
+assert_eq "$(cat "$led")" "$before" "done: dry-run は履歴を変えない"
+assert_eq "$(mr_rc -n done nothing.here)" "1" "done: dry-run でも未対応でない id は終了コード 1"
+
+# 改行なしで途切れた末尾があっても、done の行を巻き込まない
+printf '%s' '{"ev":"seen","at":"2026-1' >> "$led"
+assert_eq "$(mr_rc done d.one)" "0" "done: 改行なしの壊れた末尾があっても書ける"
+out=$(mr done d.one)
+assert_contains "$out" "壊れた行を 1 行読み飛ばしました" "done: 壊れた末尾は 1 行だけ飛ばされる"
+assert_eq "$(mr_rc done d.one)" "1" "done: 壊れた末尾の後ろの done が効いている"
+
+# 中断されても、それまでに集まった要対応は seen として残る
+newenv
+mkstep 10-first.sh 'step_name="先行"
+step_run() { add_action kept "先行の要対応" --cmd "make x" }'
+mkstep 20-slow.sh 'step_name="後続"
+step_run() { touch "$MR_TD/started"; sleep 30 }'
+led="$MYROUTINE_LOG_DIR/actions.jsonl"
+"$MR" --no-lock </dev/null >/dev/null 2>&1 &
+p=$! w=0
+until [[ -e "$MR_TD/started" ]] || (( w >= 50 )); do sleep 0.1; (( w++ )); done
+kill -TERM $p 2>/dev/null
+wait $p 2>/dev/null
+assert_eq "$(grep -c '"ev":"seen","at":"[^"]*","id":"first.kept"' "$led" 2>/dev/null)" "1" "履歴: 中断しても集まった要対応の seen が 1 回だけ残る"
+
+# 予約名
+newenv
+mkstep 10-done.sh 'step_name="D"
+step_run() { : }'
+out=$(mr ls)
+assert_contains "$out" "サブコマンドと衝突しています: done" "予約名: done は slug にできない"
+fi
+
+# ─────────────────────────────────────────────────────────────────
 print -r -- ""
 print -r -- "════════════════════════════════════"
 if (( FAIL == 0 )); then

@@ -73,6 +73,7 @@ zsh 版との違い:
 
 - 既定の出力がレンダラの形になります。成功したステップの出力は畳まれ、全文は日次ログに残ります。dry-run（`-n`）ではステップの出力（`[dry-run] <コマンド>`）をそのまま表示します
 - `myroutine last` は既定で直近の実行をレンダラの形で描きます。保存済みの JSONL は `myroutine --jsonl last` で取り出せます
+- `myroutine done <id> [<id>...]` は要対応を片付けた印を付けます（下記「要対応の履歴」）。渡した id が 1 つでも未対応でなければ（存在しない・すでに閉じている）、何も記録せず終了コード 1 で終わります
 - 宣言の検証が増えました。未知の `step_*` 変数、bool（`step_critical` / `step_parallel` / `step_interactive` / `step_abort_on_fail` / `step_destructive`）に `true` / `false` 以外、`step_timeout` に 0 以上の整数以外を書くとエラーになります
 - 逐次ステップは、runner が端末の前景にいるときだけ端末を受け取ります（ステップ内の `confirm` が読めるように）。終わり方にかかわらず端末は runner に戻ります
 - ロックは zsh 版と同じ `lock.d` を使うので、新旧を同時に起動すると後から起動した方が中止されます
@@ -100,7 +101,7 @@ myroutine brew,omz       指定した slug のステップのみを指定順で�
 ## ステップの書き方
 
 `~/.config/myroutine/steps.d/` に `<slug>.sh` 形式で 1 ファイル 1 ステップ置きます。
-slug はファイル名から `.sh` を除いたものです（英数字と `_` `-` だけ。数字だけの名前と `ls` / `last` は使えません）。
+slug はファイル名から `.sh` を除いたものです（英数字と `_` `-` だけ。数字だけの名前と `ls` / `last` / `done` / `view` は使えません）。
 
 実行順は `steps.d/order` に 1 行 1 slug で書いた順です。`#` 以降はコメント、空行は無視します。
 **順序を変えたいときは `order` の行を入れ替えるだけ**で、ファイル名は変わりません。
@@ -279,6 +280,22 @@ skip・失敗・タイムアウトしたステップの要対応は「今回出�
 
 ログは `$MYROUTINE_LOG_DIR/YYYY-MM-DD.txt` に**追記**されます（端末には色付き、
 ファイルには ANSI を除去して書きます）。要対応 id の履歴は `history.tsv` です。
+
+### 要対応の履歴
+
+`history.tsv` は連続日数と「解消」の判定用で、本文を持ちません。本文つきの履歴は `$MYROUTINE_LOG_DIR/actions.jsonl` に 1 行 1 イベントで**追記**されます（dry-run は書きません。slug 指定の部分実行は書きます）。
+
+```
+{"ev":"seen","at":"2026-11-10T09:00:00+09:00","id":"brew.outdated","slug":"brew","step_name":"Homebrew","text":"..."}
+{"ev":"cleared","at":"...","id":"brew.outdated"}
+{"ev":"done","at":"...","id":"brew.outdated"}
+```
+
+- `seen`: 実行で要対応が出たとき、要対応ごとに 1 行
+- `cleared`: そのステップを今回評価できた（成功した）のに、未対応だった id を出さなかったとき。実行間隔で skip・失敗・タイムアウト・未実行のステップの未対応は閉じません
+- `done`: `myroutine done <id>` を打ったとき
+
+読むときは id ごとに畳みます。`seen` で開き、`cleared` / `done` で閉じ、閉じたあとにまた `seen` が来たら新しい 1 件です。
 
 ## 前提
 

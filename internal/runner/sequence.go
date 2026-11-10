@@ -465,6 +465,10 @@ func (r *Runner) finish() {
 	if r.fullRun && !r.opt.DryRun {
 		r.appendHistory()
 	}
+	// 要対応の履歴は部分実行でも残す（cleared は評価できたステップだけが対象）。
+	if !r.opt.DryRun {
+		r.appendLedger()
+	}
 }
 
 func (r *Runner) actionIDs() []string {
