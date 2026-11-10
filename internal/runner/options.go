@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const usageLine = "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json|--jsonl] [--timeout N] [--no-lock] [--force-cadence] [ls | last | done <id>... | <slug: brew,omz>]"
+const usageLine = "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json|--jsonl] [--timeout N] [--no-lock] [--force-cadence] [ls | last | done <id>... | view [--no-open] | <slug: brew,omz>]"
 
 // Options はコマンドライン引数の解釈結果。
 type Options struct {
@@ -18,6 +18,7 @@ type Options struct {
 	JSONL        bool
 	NoLock       bool
 	ForceCadence bool
+	NoOpen       bool // view: ブラウザで開かずパスだけ出す
 	Help         bool
 	// Timeout は --timeout の値。nil なら MYROUTINE_TIMEOUT を使う。
 	Timeout *int
@@ -79,6 +80,8 @@ func parseArgs(args []string) (Options, error) {
 			o.NoLock = true
 		case "--force-cadence":
 			o.ForceCadence = true
+		case "--no-open":
+			o.NoOpen = true
 		case "--timeout":
 			if i+1 >= len(args) || !isDigits(args[i+1]) {
 				return o, &usageError{msg: "ERROR: --timeout には秒数を指定してください"}
