@@ -86,3 +86,14 @@ func TestEmptyAndSkipped(t *testing.T) {
 		t.Error("壊れた行の件数が出ない")
 	}
 }
+
+// エスケープした引用符を含む行は、# の後ろも切らずにそのまま残す。
+func TestStripCommentKeepsEscapedQuote(t *testing.T) {
+	in := `printf '%s\n' "a \" # b"`
+	if got := stripComment(in); got != in {
+		t.Fatalf("stripComment(%q) = %q, want unchanged", in, got)
+	}
+	if got := stripComment("ls -l   # 内訳だけ見る"); got != "ls -l" {
+		t.Fatalf("comment not stripped: %q", got)
+	}
+}

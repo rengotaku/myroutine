@@ -142,7 +142,11 @@ func SplitText(text string) (body, cmds []string) {
 }
 
 // stripComment は空白の直後にある（引用符の外の）# 以降を落とす。
+// バックスラッシュを含む行はエスケープを正しく追えないので、切らずにそのまま返す。
 func stripComment(s string) string {
+	if strings.ContainsRune(s, '\\') {
+		return strings.TrimSpace(s)
+	}
 	var quote rune
 	prevSpace := true
 	for i, r := range s {

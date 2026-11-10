@@ -65,10 +65,7 @@ func writeAtomic(path string, data []byte) error {
 		os.Remove(name)
 		return err
 	}
-	if err := os.Chmod(name, 0o644); err != nil {
-		os.Remove(name)
-		return err
-	}
+	// CreateTemp の 0600 のまま置く（要対応の本文を他のユーザーに読ませない）
 	if err := os.Rename(name, path); err != nil {
 		os.Remove(name)
 		return err
