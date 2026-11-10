@@ -139,6 +139,9 @@ func (r *Runner) main() int {
 	if sub == "last" {
 		return r.showLast()
 	}
+	if sub == "view" {
+		return r.runView(r.opt.Args[1:])
+	}
 	if sub == "done" {
 		return r.runDone(r.opt.Args[1:])
 	}

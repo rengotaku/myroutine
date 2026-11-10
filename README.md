@@ -74,6 +74,7 @@ zsh 版との違い:
 - 既定の出力がレンダラの形になります。成功したステップの出力は畳まれ、全文は日次ログに残ります。dry-run（`-n`）ではステップの出力（`[dry-run] <コマンド>`）をそのまま表示します
 - `myroutine last` は既定で直近の実行をレンダラの形で描きます。保存済みの JSONL は `myroutine --jsonl last` で取り出せます
 - `myroutine done <id> [<id>...]` は要対応を片付けた印を付けます（下記「要対応の履歴」）。渡した id が 1 つでも未対応でなければ（存在しない・すでに閉じている）、何も記録せず終了コード 1 で終わります
+- `myroutine view [--no-open]` は要対応の履歴（`actions.jsonl`）を `$MYROUTINE_LOG_DIR/view.html` の 1 枚の HTML にして、既定ではブラウザで開きます（darwin は `open`、linux は `xdg-open`。開けなければパスを出して終了コード 1）。`--no-open` ならパスを出すだけです。未対応は初出が古い順、対応済み・解消済みは直近 30 日分だけを折りたたみの中に出します。各コマンドにコピーボタンが付きます。外部の CSS / JS は読みません
 - 宣言の検証が増えました。未知の `step_*` 変数、bool（`step_critical` / `step_parallel` / `step_interactive` / `step_abort_on_fail` / `step_destructive`）に `true` / `false` 以外、`step_timeout` に 0 以上の整数以外を書くとエラーになります
 - 逐次ステップは、runner が端末の前景にいるときだけ端末を受け取ります（ステップ内の `confirm` が読めるように）。終わり方にかかわらず端末は runner に戻ります
 - ロックは zsh 版と同じ `lock.d` を使うので、新旧を同時に起動すると後から起動した方が中止されます

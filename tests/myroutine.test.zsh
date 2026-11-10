@@ -2517,6 +2517,25 @@ kill -TERM $p 2>/dev/null
 wait $p 2>/dev/null
 assert_eq "$(grep -c '"ev":"seen","at":"[^"]*","id":"first.kept"' "$led" 2>/dev/null)" "1" "履歴: 中断しても集まった要対応の seen が 1 回だけ残る"
 
+# view: 履歴から view.html を書く
+newenv
+mkstep 10-v.sh 'step_name="表示"
+step_run() { add_action pending "棚卸しする" --cmd "make review # 見る" }'
+mr >/dev/null
+out=$(mr_stdout view --no-open)
+assert_eq "$out" "$MYROUTINE_LOG_DIR/view.html" "view: --no-open はパスだけを stdout に出す"
+html=$(cat "$MYROUTINE_LOG_DIR/view.html")
+assert_contains "$html" "myroutine done v.pending" "view: 未対応の done コマンドが入る"
+assert_contains "$html" "make review" "view: 本文のコマンド行が入る"
+assert_not_contains "$html" "make review # 見る" "view: コマンドのコメントは外す"
+assert_eq "$(mr_rc view --no-open)" "0" "view: 終了コード 0"
+assert_eq "$(mr_rc view --bogus)" "1" "view: 未知の引数は 1"
+
+# 履歴が無くてもエラーにしない
+newenv
+mr_stdout view --no-open >/dev/null
+assert_contains "$(cat "$MYROUTINE_LOG_DIR/view.html")" "未対応はありません" "view: 履歴ファイルが無ければ 0 件として描く"
+
 # 予約名
 newenv
 mkstep 10-done.sh 'step_name="D"
