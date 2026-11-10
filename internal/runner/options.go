@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const usageLine = "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json|--jsonl] [--timeout N] [--no-lock] [--force-cadence] [ls | last | <slug: brew,omz>]"
+const usageLine = "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json|--jsonl] [--timeout N] [--no-lock] [--force-cadence] [ls | last | done <id>... | <slug: brew,omz>]"
 
 // Options はコマンドライン引数の解釈結果。
 type Options struct {

@@ -138,6 +138,9 @@ func (r *Runner) main() int {
 	if sub == "last" {
 		return r.showLast()
 	}
+	if sub == "done" {
+		return r.runDone(r.opt.Args[1:])
+	}
 
 	if err := r.setupExec(); err != nil {
 		r.diag.line(err.Error())

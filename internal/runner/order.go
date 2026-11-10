@@ -13,7 +13,7 @@ import (
 var (
 	slugRe      = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	legacyRe    = regexp.MustCompile(`^[0-9]+-(.+)$`)
-	reservedSet = map[string]bool{"ls": true, "last": true}
+	reservedSet = map[string]bool{"ls": true, "last": true, "done": true, "view": true}
 )
 
 // readOrder は $MYROUTINE_STEPS_DIR/order を読み、slug の並びを返す。1 行 1 slug で、
@@ -63,7 +63,7 @@ func readOrder(stepsDir string, errs *diag) ([]string, bool) {
 			bad = true
 		case reservedSet[slug]:
 			errs.line(fmt.Sprintf("ERROR: slug がサブコマンドと衝突しています: %s (order:%d)", slug, lineno))
-			errs.line("       ls / last は使えません。別の slug に変えてください")
+			errs.line("       ls / last / done / view は使えません。別の slug に変えてください")
 			bad = true
 		case seen[slug]:
 			errs.line(fmt.Sprintf("ERROR: order で slug が重複しています: %s (order:%d)", slug, lineno))
