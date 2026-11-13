@@ -6,13 +6,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/rengotaku/myroutine/internal/ledger"
+	"github.com/rengotaku/myroutine/internal/night"
 	"github.com/rengotaku/myroutine/internal/view"
 )
 
 // runView は `myroutine view [--no-open]`。履歴を view.html に書き、既定ではブラウザで開く。
+// night-done は parseArgs が view の経路へ載せ替えるので、ここで振り分ける。
 func (r *Runner) runView(args []string) int {
+	if r.opt.NightDone {
+		return r.runNightDone(args)
+	}
 	if len(args) > 0 {
 		r.diag.line("Usage: myroutine view [--no-open]")
 		return 1
@@ -24,7 +30,9 @@ func (r *Runner) runView(args []string) int {
 		return 1
 	}
 	host, _ := os.Hostname()
-	html, err := view.Render(view.Input{Entries: entries, Skipped: skipped, Now: r.now(), Host: host})
+	in := view.Input{Entries: entries, Skipped: skipped, Now: r.now(), Host: host}
+	in.Night = r.nightInput()
+	html, err := view.Render(in)
 	if err != nil {
 		r.diag.line("ERROR: HTML を作れません: " + err.Error())
 		return 1
@@ -47,6 +55,32 @@ func (r *Runner) runView(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// nightInput は夜間実行の入力を読む。NIGHT_RUN_DIR のディレクトリが無いとき（夜間実行を
+// しない機械）は nil を返し、view は今までどおりタブを出さない。
+// 結果（latest.json）と状態（night-run status）は独立に読み、片方が駄目でも他方は出す。
+func (r *Runner) nightInput() *view.NightInput {
+	dir := night.Dir()
+	if dir == "" {
+		return nil
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return nil
+	}
+	ni := &view.NightInput{}
+	if rep, err := night.LoadReport(dir); err != nil {
+		ni.ReportErr = err.Error()
+	} else {
+		ni.Report = &rep
+	}
+	if st, err := night.RunStatus("", 5*time.Second); err != nil {
+		ni.StatusErr = err.Error()
+	} else {
+		ni.Status = &st
+	}
+	ni.Acks, _ = night.LoadAcks(night.AckPath(r.cfg.LogDir))
+	return ni
 }
 
 // writeAtomic は一時ファイルに書いてから rename する（読む側に書きかけを見せない）。

@@ -26,15 +26,63 @@ h1 { font-size:20px; margin:0; }
 .tag { font-size:12px; border:1px solid var(--line); border-radius:10px; padding:0 8px; color:var(--mute); font-weight:400; }
 summary { cursor:pointer; color:var(--mute); margin-top:20px; }
 .none { margin:24px 0; color:var(--mute); }
-</style>
+</style>{{if .Night}}
+<style>
+:root { --done:#2b8a3e; --stopped:#e8590c; --error:#c92a2a; --timeout:#7048e8; --running:#0b7285; --band-live:#1c7ed6; }
+@media (prefers-color-scheme: dark) { :root { --done:#69db7c; --stopped:#ffa94d; --error:#ff8787; --timeout:#b197fc; --running:#66d9e8; --band-live:#4dabf7; } }
+.tabs { display:flex; flex-wrap:wrap; gap:2px 8px; margin:14px 0 8px; border-bottom:1px solid var(--line); }
+.tabs a { padding:6px 4px; color:var(--mute); text-decoration:none; border-bottom:2px solid transparent; }
+.tabs a[aria-selected="true"] { color:var(--fg); border-bottom-color:var(--accent); }
+.js .panel { display:none; }
+.js .panel.active { display:block; }
+.night-need { margin:2px 0 0; }
+.night-h { font-size:17px; margin:20px 0 8px; display:flex; flex-wrap:wrap; justify-content:space-between; gap:2px 12px; align-items:baseline; }
+.night-counts { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+.cnt { font-size:13px; border:1px solid var(--line); border-radius:10px; padding:1px 8px; }
+.cnt.cat-done { border-color:var(--done); color:var(--done); }
+.cnt.cat-stopped { border-color:var(--stopped); color:var(--stopped); }
+.cnt.cat-error { border-color:var(--error); color:var(--error); }
+.cnt.cat-timeout { border-color:var(--timeout); color:var(--timeout); }
+.band { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--mute); border-radius:6px; padding:10px 12px; margin:12px 0; }
+.band-live { border-left-color:var(--band-live); }
+.band-stale { border-color:var(--error); border-left-color:var(--error); }
+.band-err { border-left-color:var(--stopped); }
+.band-head { font-weight:600; }
+.band-msg { margin:4px 0 0; font-size:13px; }
+.band-list { list-style:none; margin:6px 0 0; padding:0; }
+.band-list li { margin:2px 0; }
+.band-name { font-weight:600; }
+.dot { display:inline-block; width:8px; height:8px; margin-right:6px; border-radius:50%; background:var(--running); animation:pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity:.3; } }
+@media (prefers-reduced-motion: reduce) { .dot { animation:none; } }
+.night-cat { font-size:14px; margin:16px 0 0; }
+.night-cat.cat-done { color:var(--done); }
+.night-cat.cat-stopped { color:var(--stopped); }
+.night-cat.cat-error { color:var(--error); }
+.night-cat.cat-timeout { color:var(--timeout); }
+.night-cat.cat-running { color:var(--running); }
+.night-cat.cat-other { color:var(--mute); }
+.card.cat-done { border-left-color:var(--done); }
+.card.cat-stopped { border-left-color:var(--stopped); }
+.card.cat-error { border-left-color:var(--error); }
+.card.cat-timeout { border-left-color:var(--timeout); }
+.card.cat-running { border-left-color:var(--running); }
+.card.cat-other { border-left-color:var(--mute); }
+.night-acked { margin-top:20px; }
+</style>{{end}}
 </head>
 <body>
 <main>
 <header>
 <h1>myroutine 要対応</h1>
 <div class="meta">{{.Host}} · {{.Stamp}}</div>
-</header>
-<p class="sub">未対応 {{.OpenCount}} 件 ・ 対応済み（直近 {{.ClosedDays}} 日）{{len .Closed}} 件</p>
+</header>{{if .Night}}
+<nav class="tabs" role="tablist" aria-label="表示の切替">
+<a role="tab" id="tab-today" href="#today" aria-controls="panel-today" aria-selected="true">今日の要対応 <span class="tag">{{.OpenCount}}</span></a>
+<a role="tab" id="tab-night" href="#night" aria-controls="panel-night" aria-selected="false">夜間実行 <span class="tag">{{.Night.NightCount}}</span></a>
+</nav>
+<section class="panel active" id="panel-today" role="tabpanel" aria-labelledby="tab-today">{{end}}
+<p class="sub">未対応 {{.OpenCount}} 件 ・ 対応済み（直近 {{.ClosedDays}} 日）{{len .Closed}} 件</p>{{if .Night}}<p class="sub night-need">夜間実行の要対応 {{.Night.NightCount}} 件</p>{{end}}
 {{if .Skipped}}<div class="warn">履歴の壊れた行を {{.Skipped}} 行読み飛ばしました</div>{{end}}
 {{if .Open}}{{range .Open}}
 <section class="card">
@@ -53,7 +101,49 @@ summary { cursor:pointer; color:var(--mute); margin-top:20px; }
 {{range .Body}}<div class="body">{{.}}</div>
 {{end}}<div class="stat">初出 {{.First}} ・ 最終 {{.Last}} ・ {{.Seen}} 回 ・ {{.ID}}</div>
 </section>
-{{end}}</details>{{end}}
+{{end}}</details>{{end}}{{if .Night}}
+</section>
+<section class="panel" id="panel-night" role="tabpanel" aria-labelledby="tab-night">
+<p class="sub">この画面は myroutine view を実行した時点の状態です。自動では更新しません（更新は myroutine view の再実行）。</p>
+<p class="sub">ボタンはコマンドをコピーするだけです。この画面からは何も実行しません。</p>
+{{if .Night.Band}}<div class="band band-{{.Night.Band.Kind}}">
+<div class="band-head">{{.Night.Band.Head}}</div>
+{{if .Night.Band.Message}}<p class="band-msg">{{.Night.Band.Message}}</p>{{end}}
+{{if .Night.Band.RunningItems}}<ul class="band-list">
+{{range .Night.Band.RunningItems}}<li><span class="dot" aria-hidden="true"></span><span class="band-name">{{.Title}}</span>{{if .Detail}} <span class="stat">{{.Detail}}</span>{{end}}</li>
+{{end}}</ul>{{end}}
+{{if .Night.Band.QueuedItems}}<div class="stat">待機（古い順）</div><ul class="band-list">
+{{range .Night.Band.QueuedItems}}<li><span class="band-name">{{.Title}}</span>{{if .Detail}} <span class="stat">{{.Detail}}</span>{{end}}</li>
+{{end}}</ul>{{end}}
+{{if .Night.Band.StaleItems}}<ul class="band-list">
+{{range .Night.Band.StaleItems}}<li><span class="band-name">{{.Title}}</span>{{if .Detail}} <span class="stat">{{.Detail}}</span>{{end}}</li>
+{{end}}</ul>{{end}}
+</div>{{end}}
+<h2 class="night-h">前の夜の結果{{if .Night.Generated}} <span class="meta">{{.Night.Generated}}</span>{{end}}</h2>
+{{if .Night.ReportErr}}<div class="warn">結果を読めません: {{.Night.ReportErr}}</div>{{end}}
+{{if .Night.Stale}}<div class="warn">{{.Night.Stale}}</div>{{end}}
+{{if .Night.HasReport}}<p class="night-counts"><span class="cnt cat-done">完了 {{.Night.Done}}</span><span class="cnt cat-stopped">停止 {{.Night.Stopped}}</span><span class="cnt cat-error">異常終了 {{.Night.Error}}</span><span class="cnt cat-timeout">時間切れ {{.Night.Timeout}}</span></p>
+{{if .Night.Empty}}<p class="none">前の夜に動いた件はありません</p>{{end}}
+{{range .Night.Groups}}<h3 class="night-cat cat-{{.Key}}">{{.Label}} {{.Count}} 件</h3>
+{{range .Cards}}<section class="card cat-{{.Category}}">
+<div class="title"><span>{{.Title}}</span>{{if .State}}<span class="slug">{{.State}}</span>{{end}}</div>
+{{if .Reason}}<div class="body">理由: {{.Reason}}</div>{{end}}
+{{if .Progress}}<div class="body">進んだところ: {{.Progress}}</div>{{end}}
+{{if .Meta}}<div class="stat">{{.Meta}}</div>{{end}}
+{{if .ResumeCmd}}<div class="cmd"><code>$ {{.ResumeCmd}}</code><button type="button" data-cmd="{{.ResumeCmd}}">コピー</button></div>{{end}}
+{{if .DoneCmd}}<div class="cmd"><code>$ {{.DoneCmd}}</code><button type="button" data-cmd="{{.DoneCmd}}">コピー</button></div>{{end}}
+</section>
+{{end}}{{end}}
+{{if .Night.Acked}}<details class="closed night-acked">
+<summary>対応済み {{len .Night.Acked}} 件（直近 {{.Night.AckedDays}} 日。クリックで展開）</summary>
+{{range .Night.Acked}}
+<section class="card cat-done">
+<div class="title"><span>{{.Title}}</span>{{if .State}}<span class="slug">{{.State}}</span>{{end}}</div>
+{{if .Reason}}<div class="body">理由: {{.Reason}}</div>{{end}}
+<div class="stat">{{if .Meta}}{{.Meta}} ・ {{end}}{{.ID}}</div>
+</section>
+{{end}}</details>{{end}}{{end}}
+</section>{{end}}
 </main>
 <script>
 document.addEventListener("click", function (ev) {
@@ -71,6 +161,27 @@ document.addEventListener("click", function (ev) {
     }, select);
   } else { select(); }
 });
-</script>
+</script>{{if .Night}}
+<script>
+(function () {
+  var tabs = document.querySelectorAll(".tabs a[role=tab]");
+  if (!tabs.length) return;
+  document.body.classList.add("js");
+  var today = document.getElementById("panel-today");
+  var night = document.getElementById("panel-night");
+  function show() {
+    var onNight = location.hash === "#night";
+    today.classList.toggle("active", !onNight);
+    night.classList.toggle("active", onNight);
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i];
+      var on = t.getAttribute("href") === (onNight ? "#night" : "#today");
+      t.setAttribute("aria-selected", on ? "true" : "false");
+    }
+  }
+  window.addEventListener("hashchange", show);
+  show();
+})();
+</script>{{end}}
 </body>
 </html>

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const usageLine = "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json|--jsonl] [--timeout N] [--no-lock] [--force-cadence] [ls | last | done <id>... | view [--no-open] | <slug: brew,omz>]"
+const usageLine = "Usage: myroutine [-n|--dry-run] [-y|--yes] [--json|--jsonl] [--timeout N] [--no-lock] [--force-cadence] [ls | last | done <id>... | night-done <id>... | view [--no-open] | <slug: brew,omz>]"
 
 // Options はコマンドライン引数の解釈結果。
 type Options struct {
@@ -19,6 +19,7 @@ type Options struct {
 	NoLock       bool
 	ForceCadence bool
 	NoOpen       bool // view: ブラウザで開かずパスだけ出す
+	NightDone    bool // night-done: 夜間実行の件を対応済みにする（view の経路で扱う）
 	Help         bool
 	// Timeout は --timeout の値。nil なら MYROUTINE_TIMEOUT を使う。
 	Timeout *int
@@ -97,6 +98,7 @@ func parseArgs(args []string) (Options, error) {
 			return o, nil
 		case "--":
 			o.Args = append(o.Args, args[i+1:]...)
+			normalizeSub(&o)
 			return o, nil
 		default:
 			if strings.HasPrefix(a, "-") {
@@ -109,7 +111,18 @@ func parseArgs(args []string) (Options, error) {
 	if o.JSON && o.JSONL {
 		return o, &usageError{msg: "ERROR: --json と --jsonl は併用できません"}
 	}
+	normalizeSub(&o)
 	return o, nil
+}
+
+// normalizeSub は night-done を、done と同じ位置づけのサブコマンドとして扱う。
+// 実際に書く処理は runNightDone（nightdone.go）で、runView が NightDone を見て渡す。
+// runner.go のサブコマンドの振り分けを増やさずに済むよう、ここで view の経路へ載せ替える。
+func normalizeSub(o *Options) {
+	if len(o.Args) > 0 && o.Args[0] == "night-done" {
+		o.NightDone = true
+		o.Args[0] = "view"
+	}
 }
 
 // envOr は zsh の ${VAR:=default} と同じく、未設定と空を同じに扱う。
