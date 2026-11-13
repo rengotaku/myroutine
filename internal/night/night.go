@@ -102,15 +102,15 @@ func LoadReport(dir string) (Report, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return rep, fmt.Errorf("結果がありません: %s", path)
+			return rep, fmt.Errorf("%s がありません", path)
 		}
-		return rep, fmt.Errorf("結果を読めません: %v", err)
+		return rep, fmt.Errorf("%s を読めません: %v", path, err)
 	}
 	if len(bytes.TrimSpace(b)) == 0 {
-		return rep, fmt.Errorf("結果が空です: %s", path)
+		return rep, fmt.Errorf("%s が空です", path)
 	}
 	if err := json.Unmarshal(b, &rep); err != nil {
-		return rep, fmt.Errorf("結果の JSON が壊れています: %v", err)
+		return rep, fmt.Errorf("JSON が壊れています: %v", err)
 	}
 	return rep, nil
 }
