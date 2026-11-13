@@ -13,6 +13,9 @@ import (
 
 // runView は `myroutine view [--no-open]`。履歴を view.html に書き、既定ではブラウザで開く。
 func (r *Runner) runView(args []string) int {
+	if r.opt.NightDone {
+		return r.runNightDone(args)
+	}
 	if len(args) > 0 {
 		r.diag.line("Usage: myroutine view [--no-open]")
 		return 1
