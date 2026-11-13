@@ -154,6 +154,9 @@ slug にドットを許さないのは、`<slug>.<id>` から slug を一意に�
 | ステップを並列で走らせる | 対象ステップに `step_parallel=true`。同時実行数は `MYROUTINE_PARALLEL_MAX` |
 | 並列グループの区切りを変える | `order` の並び（グループは実行順の連続範囲で決まる） |
 | ステップを設定ごと無効化する | 対象ステップに `step_disabled="<理由>"` |
+| 夜間実行の入力を変える | dotfiles 側の `report/latest.json` / `night-run status`（読む側は `internal/night`） |
+| 夜間実行の画面を変える | `internal/view/view.html.tmpl`（タブ・帯・区分の色）と `internal/view/view.go` の `buildNight` |
+| 対応済みの扱いを変える | `internal/runner/nightdone.go`、`night-ack.jsonl` の読み書き（`internal/night`） |
 
 ## 触るときに壊しやすいところ
 
@@ -280,6 +283,26 @@ Go の runner はステップを `zsh <prelude> meta|requires|exec <step.sh>` �
   満杯なら表示を捨てる。runner 本体が実 stderr へ直接書くと、読まれない stderr で全体が止まる
 - **SIGPIPE は Notify で受ける** — `signal.Ignore` にすると子に SIG_IGN が引き継がれ、
   ステップの外部コマンドが閉じたパイプで終われなくなる
+
+## 夜間実行
+
+夜間の実行（dotfiles 側の night-run）の結果を、`myroutine view` の「夜間実行」タブに出す。
+読むだけで、night-run と `$NIGHT_RUN_DIR` の中身は書き換えない。
+
+表1: 夜間実行の入力
+
+| 入力 | 場所 | 書く側 |
+|---|---|---|
+| 前の夜の結果 | `$NIGHT_RUN_DIR/report/latest.json` | dotfiles（毎朝） |
+| いまの状態 | `night-run status` の標準出力（JSON。5 秒で打ち切る） | night-run |
+| 対応済み | `$MYROUTINE_LOG_DIR/night-ack.jsonl` | この repo（`myroutine night-done`） |
+
+- `NIGHT_RUN_DIR` の既定は `$HOME/.local/state/night-run`。ディレクトリが無い機械（夜間実行をしない）ではタブを出さず、今までの画面と同じ出力になる
+- 前の夜の結果は 4 区分（完了・停止・異常終了・時間切れ）。停止・異常終了・時間切れの件に、理由・進んだところ・再開コマンドと `myroutine night-done <id>` のコピーを付ける。完了は一覧だけ。4 区分にも `running` にも無い category は落とさず「その他」に置く
+- 対応済みは追記専用の JSONL（1 行 `{"at":"<RFC3339>","id":"<job id>"}`）。記録した id は一覧と件数から外し、記録から 30 日（`ClosedWindow` と同じ）は折りたたみに残す。`myroutine night-done` は結果に無い id が 1 つでもあれば何も書かずに終了コード 1
+- 古さ: `generated_at` を画面を作った時刻（`Now`）のタイムゾーンへ直し、日付が違えば「今朝のレポートがありません（前回: ○月○日）」を出す（読めない値なら「不明」）。step が失敗した日に、前日の結果を今朝のものと取り違えないため
+- 帯（いまの状態）は `executor_alive` と `stale_running` で 3 つの状態を出し分ける。`night-run status` が見つからない・失敗・時間切れ・JSON が壊れているときは「状態を読めません: 理由」を出し、前の夜の結果はそのまま出す
+- 画面は静的な 1 枚で、ボタンはコマンドをコピーするだけ。タブの切替は URL のハッシュ（`#night`）で、JS が無くても両方の節が縦に並んで見える
 
 ## テスト
 

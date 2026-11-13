@@ -140,7 +140,7 @@ summary { cursor:pointer; color:var(--mute); margin-top:20px; }
 <section class="card cat-done">
 <div class="title"><span>{{.Title}}</span>{{if .State}}<span class="slug">{{.State}}</span>{{end}}</div>
 {{if .Reason}}<div class="body">理由: {{.Reason}}</div>{{end}}
-{{if .Meta}}<div class="stat">{{.Meta}}</div>{{end}}
+<div class="stat">{{if .Meta}}{{.Meta}} ・ {{end}}{{.ID}}</div>
 </section>
 {{end}}</details>{{end}}{{end}}
 </section>{{end}}

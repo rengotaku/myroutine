@@ -221,6 +221,9 @@ func TestNightAckedHidden(t *testing.T) {
 	if !strings.Contains(out, "対応済み 1 件（直近 30 日") || !strings.Contains(out, "o/s#1") {
 		t.Error("直近の対応済みが折りたたみに出ていない")
 	}
+	if !strings.Contains(out, "s1") {
+		t.Error("対応済みにした件の id が残っていない")
+	}
 	if strings.Contains(out, "o/e#2") {
 		t.Error("30 日を超えた対応済みが残っている")
 	}
