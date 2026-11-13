@@ -193,6 +193,9 @@ func TestNightCardsAndCopyButtons(t *testing.T) {
 	if n := strings.Count(out, `data-cmd="room resume`); n != 1 {
 		t.Errorf("再開コマンドのコピー = %d 個", n)
 	}
+	if strings.Contains(out, `data-cmd=""`) {
+		t.Error("中身が空のコピーのボタンが出ている")
+	}
 	if strings.Contains(out, "null") {
 		t.Error("null という文字が出ている")
 	}
