@@ -104,7 +104,7 @@ summary { cursor:pointer; color:var(--mute); margin-top:20px; }
 {{end}}</details>{{end}}{{if .Night}}
 </section>
 <section class="panel" id="panel-night" role="tabpanel" aria-labelledby="tab-night">
-<p class="sub">この画面を開いた時点の状態です。自動では更新しません（更新は画面の再読み込み）。</p>
+<p class="sub">この画面は myroutine view を実行した時点の状態です。自動では更新しません（更新は myroutine view の再実行）。</p>
 <p class="sub">ボタンはコマンドをコピーするだけです。この画面からは何も実行しません。</p>
 {{if .Night.Band}}<div class="band band-{{.Night.Band.Kind}}">
 <div class="band-head">{{.Night.Band.Head}}</div>
